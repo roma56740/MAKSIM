@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+import asyncio
+
+from aiogram import F, Router
+from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message
+
+from callbacks import BroadcastCb
+from config import Settings
+from db import is_admin, list_user_ids
+from keyboards.admin import admin_back_cancel_kb, admin_main_kb
+
+router = Router()
+
+
+class BroadcastForm(StatesGroup):
+    content = State()
+    confirm = State()
+
+
+def _confirm_kb():
+    from aiogram.types import InlineKeyboardButton
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="✅ Отправить", callback_data=BroadcastCb(action="send").pack()),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=BroadcastCb(action="cancel").pack()),
+    )
+    return kb.as_markup()
+
+
+@router.message(F.text == "📢 Рассылка")
+async def broadcast_start(message: Message, state: FSMContext, settings: Settings) -> None:
+    if not await is_admin(settings.db_path, message.from_user.id, settings.admin_ids):
+        return
+
+    await state.clear()
+    await state.set_state(BroadcastForm.content)
+
+    await message.answer(
+        "📢 <b>Рассылка всем пользователям</b>\n\n"
+        "Отправьте <b>одно</b> сообщение:\n"
+        "• текст\n"
+        "• фото (можно с подписью)\n"
+        "• файл (можно с подписью)\n\n"
+        "Управление: «⬅️ Назад» / «❌ Отмена»",
+        reply_markup=admin_back_cancel_kb(),
+    )
+
+
+@router.message(BroadcastForm.content, F.text == "❌ Отмена")
+@router.message(BroadcastForm.confirm, F.text == "❌ Отмена")
+async def broadcast_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("❌ Отменено", reply_markup=admin_main_kb())
+
+
+@router.message(BroadcastForm.content, F.text == "⬅️ Назад")
+@router.message(BroadcastForm.confirm, F.text == "⬅️ Назад")
+async def broadcast_back(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_main_kb())
+
+
+@router.message(BroadcastForm.content, F.photo)
+async def broadcast_take_photo(message: Message, state: FSMContext) -> None:
+    await state.update_data(kind="photo", file_id=message.photo[-1].file_id, text=message.caption or "")
+
+    await message.answer("👁 <b>Предпросмотр</b>:")
+    await message.answer_photo(message.photo[-1].file_id, caption=message.caption or "")
+    await message.answer("Подтвердите отправку:", reply_markup=_confirm_kb())
+
+    await state.set_state(BroadcastForm.confirm)
+
+
+@router.message(BroadcastForm.content, F.document)
+async def broadcast_take_document(message: Message, state: FSMContext) -> None:
+    await state.update_data(kind="document", file_id=message.document.file_id, text=message.caption or "")
+
+    await message.answer("👁 <b>Предпросмотр</b>:")
+    await message.answer_document(message.document.file_id, caption=message.caption or "")
+    await message.answer("Подтвердите отправку:", reply_markup=_confirm_kb())
+
+    await state.set_state(BroadcastForm.confirm)
+
+
+@router.message(BroadcastForm.content, F.text)
+async def broadcast_take_text(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Отправьте текст/фото/файл.")
+        return
+
+    await state.update_data(kind="text", file_id=None, text=text)
+
+    await message.answer("👁 <b>Предпросмотр</b>:")
+    await message.answer(text)
+    await message.answer("Подтвердите отправку:", reply_markup=_confirm_kb())
+
+    await state.set_state(BroadcastForm.confirm)
+
+
+@router.message(BroadcastForm.content)
+async def broadcast_invalid(message: Message) -> None:
+    await message.answer("Отправьте текст/фото/файл одним сообщением.")
+
+
+@router.callback_query(BroadcastCb.filter(F.action == "cancel"))
+async def broadcast_cancel_cb(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await call.message.answer("❌ Отменено", reply_markup=admin_main_kb())
+    await call.answer()
+
+
+@router.callback_query(BroadcastCb.filter(F.action == "send"))
+async def broadcast_send(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
+    if not await is_admin(settings.db_path, call.from_user.id, settings.admin_ids):
+        await call.answer("Нет доступа", show_alert=True)
+        return
+
+    data = await state.get_data()
+    kind = data.get("kind")
+    file_id = data.get("file_id")
+    text = data.get("text") or ""
+
+    user_ids = await list_user_ids(settings.db_path, exclude_statuses=("blocked",))
+
+    ok = 0
+    fail = 0
+
+    status_msg = await call.message.answer(f"⏳ Отправляю… получателей: <b>{len(user_ids)}</b>")
+
+    for uid in user_ids:
+        try:
+            if kind == "text":
+                await call.bot.send_message(uid, text)
+            elif kind == "photo":
+                await call.bot.send_photo(uid, file_id, caption=text)
+            elif kind == "document":
+                await call.bot.send_document(uid, file_id, caption=text)
+            else:
+                continue
+            ok += 1
+        except Exception:
+            fail += 1
+
+        await asyncio.sleep(0.05)
+
+    await state.clear()
+
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+    await status_msg.edit_text(
+        "✅ <b>Рассылка завершена</b>\n\n"
+        f"Успешно: <b>{ok}</b>\n"
+        f"Ошибки: <b>{fail}</b>",
+    )
+    await call.message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_main_kb())
+    await call.answer()
