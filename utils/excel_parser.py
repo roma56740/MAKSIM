@@ -79,13 +79,19 @@ def parse_products_xlsx(path: str) -> list[ExcelRow]:
 
     c_pk = col("id товара (pk)", "id товара", "pk")
     c_code = col("код товара", "код", "артикул", "sku")
-    c_desc = col("описание")
-    c_price = col("цена, ₽", "цена")
+    c_title = col("название", "наименование", "товар")
+    c_desc = col("описание", "название", "наименование")
+    c_price = col("цена прайс", "цена, ₽", "цена")
     c_disc = col("скидка, %", "процент скидки", "скидка")
-    c_final = col("финальная цена, ₽", "финальная цена")
-    c_type = col("тип товара", "тип")
-    c_stock = col("шт. осталось", "остаток", "кол-во")
+    c_final = col("цена после скидки", "цена со скидкой", "финальная цена, ₽", "финальная цена")
+    c_type = col("тип товара", "тип", "вид продукта")
+    c_stock = col("шт. осталось", "остаток", "кол-во", "количество")
     c_url = col("ссылка на товар", "ссылка на товар в магазине", "ссылка")
+
+    if c_disc is not None:
+        disc_header = next((k for k, i in idx.items() if i == c_disc), "")
+        if any(x in disc_header for x in ("цена после скидки", "цена со скидкой", "финальная цена")):
+            c_disc = None
 
     if c_code is None:
         raise ValueError("В файле нет колонки 'Код товара'")
@@ -101,6 +107,7 @@ def parse_products_xlsx(path: str) -> list[ExcelRow]:
         code = str(code_raw).strip()
 
         source_pk = str(values[c_pk]).strip() if c_pk is not None and values[c_pk] not in (None, "") else None
+        title = str(values[c_title]).strip() if c_title is not None and values[c_title] not in (None, "") else None
         desc = str(values[c_desc]).strip() if c_desc is not None and values[c_desc] not in (None, "") else None
 
         price = _to_float(values[c_price]) if c_price is not None else None
@@ -110,9 +117,16 @@ def parse_products_xlsx(path: str) -> list[ExcelRow]:
         if final is None and price is not None and disc is not None:
             final = round(price * (1 - disc / 100.0), 2)
 
+        if not desc:
+            desc = title
+
         ptype = str(values[c_type]).strip() if c_type is not None and values[c_type] not in (None, "") else None
         stock = _to_int(values[c_stock]) if c_stock is not None else None
         url = str(values[c_url]).strip() if c_url is not None and values[c_url] not in (None, "") else None
+
+        has_real_price = (price is not None and price > 0) or (final is not None and final > 0)
+        if not desc and not has_real_price:
+            continue
 
         rows.append(
             ExcelRow(
