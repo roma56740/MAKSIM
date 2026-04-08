@@ -20,3 +20,4 @@ opencv-python-headless>=4.8
 beautifulsoup4>=4.12
 lxml>=5.0
 xlrd
+openpyxl
