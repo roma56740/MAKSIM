@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
+from io import BytesIO
 
 from aiogram import F, Router
-from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from openpyxl import Workbook
 
 from callbacks import BroadcastCb
 from config import Settings
@@ -31,6 +33,46 @@ def _confirm_kb():
         InlineKeyboardButton(text="❌ Отмена", callback_data=BroadcastCb(action="cancel").pack()),
     )
     return kb.as_markup()
+
+
+def _fit_sheet_columns(ws) -> None:
+    for column_cells in ws.columns:
+        max_len = 0
+        column_letter = column_cells[0].column_letter
+
+        for cell in column_cells:
+            value = "" if cell.value is None else str(cell.value)
+            if len(value) > max_len:
+                max_len = len(value)
+
+        ws.column_dimensions[column_letter].width = min(max(max_len + 2, 12), 80)
+
+
+def _build_broadcast_report(
+    success_ids: list[int],
+    failed_rows: list[tuple[int, str]],
+) -> BufferedInputFile:
+    wb = Workbook()
+
+    ws_ok = wb.active
+    ws_ok.title = "Получили"
+    ws_ok.append(["tg_id", "status"])
+    for uid in success_ids:
+        ws_ok.append([uid, "sent"])
+    _fit_sheet_columns(ws_ok)
+
+    ws_fail = wb.create_sheet("Не получили")
+    ws_fail.append(["tg_id", "error"])
+    for uid, error_text in failed_rows:
+        ws_fail.append([uid, error_text])
+    _fit_sheet_columns(ws_fail)
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = f"broadcast_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return BufferedInputFile(output.getvalue(), filename=filename)
 
 
 @router.message(F.text == "📢 Рассылка")
@@ -68,7 +110,11 @@ async def broadcast_back(message: Message, state: FSMContext) -> None:
 
 @router.message(BroadcastForm.content, F.photo)
 async def broadcast_take_photo(message: Message, state: FSMContext) -> None:
-    await state.update_data(kind="photo", file_id=message.photo[-1].file_id, text=message.caption or "")
+    await state.update_data(
+        kind="photo",
+        file_id=message.photo[-1].file_id,
+        text=message.caption or "",
+    )
 
     await message.answer("👁 <b>Предпросмотр</b>:")
     await message.answer_photo(message.photo[-1].file_id, caption=message.caption or "")
@@ -79,7 +125,11 @@ async def broadcast_take_photo(message: Message, state: FSMContext) -> None:
 
 @router.message(BroadcastForm.content, F.document)
 async def broadcast_take_document(message: Message, state: FSMContext) -> None:
-    await state.update_data(kind="document", file_id=message.document.file_id, text=message.caption or "")
+    await state.update_data(
+        kind="document",
+        file_id=message.document.file_id,
+        text=message.caption or "",
+    )
 
     await message.answer("👁 <b>Предпросмотр</b>:")
     await message.answer_document(message.document.file_id, caption=message.caption or "")
@@ -116,6 +166,7 @@ async def broadcast_cancel_cb(call: CallbackQuery, state: FSMContext) -> None:
         await call.message.delete()
     except Exception:
         pass
+
     await call.message.answer("❌ Отменено", reply_markup=admin_main_kb())
     await call.answer()
 
@@ -135,8 +186,12 @@ async def broadcast_send(call: CallbackQuery, state: FSMContext, settings: Setti
 
     ok = 0
     fail = 0
+    success_ids: list[int] = []
+    failed_rows: list[tuple[int, str]] = []
 
-    status_msg = await call.message.answer(f"⏳ Отправляю… получателей: <b>{len(user_ids)}</b>")
+    status_msg = await call.message.answer(
+        f"⏳ Отправляю… получателей: <b>{len(user_ids)}</b>"
+    )
 
     for uid in user_ids:
         try:
@@ -147,10 +202,17 @@ async def broadcast_send(call: CallbackQuery, state: FSMContext, settings: Setti
             elif kind == "document":
                 await call.bot.send_document(uid, file_id, caption=text)
             else:
+                fail += 1
+                failed_rows.append((uid, f"unsupported kind: {kind}"))
+                await asyncio.sleep(0.05)
                 continue
+
             ok += 1
-        except Exception:
+            success_ids.append(uid)
+
+        except Exception as e:
             fail += 1
+            failed_rows.append((uid, str(e)[:500]))
 
         await asyncio.sleep(0.05)
 
@@ -166,5 +228,31 @@ async def broadcast_send(call: CallbackQuery, state: FSMContext, settings: Setti
         f"Успешно: <b>{ok}</b>\n"
         f"Ошибки: <b>{fail}</b>",
     )
-    await call.message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_main_kb())
+
+    try:
+        report_file = _build_broadcast_report(success_ids, failed_rows)
+
+        await call.bot.send_document(
+            chat_id=call.message.chat.id,
+            document=report_file,
+            caption=(
+                "📄 <b>Отчёт по рассылке</b>\n\n"
+                f"Получили: <b>{ok}</b>\n"
+                f"Не получили: <b>{fail}</b>"
+            ),
+        )
+    except Exception as e:
+        await call.bot.send_message(
+            chat_id=call.message.chat.id,
+            text=(
+                "⚠️ Не удалось сформировать Excel-отчёт.\n"
+                f"Ошибка: <code>{str(e)[:500]}</code>"
+            ),
+        )
+
+    await call.bot.send_message(
+        chat_id=call.message.chat.id,
+        text="🛠 <b>Админ-панель</b>",
+        reply_markup=admin_main_kb(),
+    )
     await call.answer()
