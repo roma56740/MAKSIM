@@ -21,6 +21,22 @@ def _money(v: Any) -> float:
         return 0.0
 
 
+def _invoice_period_expr(alias: str = "") -> str:
+    prefix = f"{alias}." if alias else ""
+    return (
+        "CASE "
+        f"WHEN {prefix}status IN ('approved', 'rejected') "
+        f"THEN COALESCE({prefix}handled_at, {prefix}updated_at, {prefix}created_at) "
+        f"ELSE {prefix}created_at "
+        "END"
+    )
+
+
+def _invoice_period_condition(alias: str = "") -> str:
+    expr = _invoice_period_expr(alias)
+    return f"{expr} >= ? AND {expr} < ?"
+
+
 def _autosize(ws) -> None:
     for col in ws.columns:
         max_len = 0
@@ -65,6 +81,10 @@ async def build_admin_report_xlsx(db_path: str, start_iso: str, end_iso: str, pe
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
 
+        invoice_where = _invoice_period_condition("")
+        invoice_where_i = _invoice_period_condition("i")
+        invoice_period_i = _invoice_period_expr("i")
+
         users_total = (await (await db.execute("SELECT COUNT(*) AS c FROM users")).fetchone())["c"]
         users_new = (await (await db.execute(
             "SELECT COUNT(*) AS c FROM users WHERE created_at >= ? AND created_at < ?",
@@ -77,7 +97,7 @@ async def build_admin_report_xlsx(db_path: str, start_iso: str, end_iso: str, pe
         )).fetchone())["c"]
 
         inv_total = (await (await db.execute(
-            "SELECT COUNT(*) AS c FROM invoices WHERE created_at >= ? AND created_at < ?",
+            f"SELECT COUNT(*) AS c FROM invoices WHERE {invoice_where}",
             (start_iso, end_iso)
         )).fetchone())["c"]
 
@@ -89,7 +109,7 @@ async def build_admin_report_xlsx(db_path: str, start_iso: str, end_iso: str, pe
         inv_sums = await (await db.execute(
             "SELECT COALESCE(SUM(COALESCE(deal_amount,0)),0) AS deal_sum, "
             "COALESCE(SUM(COALESCE(reward_amount,0)),0) AS reward_sum "
-            "FROM invoices WHERE created_at >= ? AND created_at < ?",
+            f"FROM invoices WHERE {invoice_where}",
             (start_iso, end_iso)
         )).fetchone()
 
@@ -149,20 +169,22 @@ async def build_admin_report_xlsx(db_path: str, start_iso: str, end_iso: str, pe
         ws_inv = wb.create_sheet("Накладные")
         inv_rows = await (await db.execute(
             "SELECT i.id, i.tg_id, u.full_name, i.supplier_id, s.name AS supplier_name, "
-            "i.deal_amount, i.reward_amount, i.file_id, i.file_kind, i.comment, i.status, i.reason, i.created_at, i.updated_at "
+            "i.deal_amount, i.reward_amount, i.file_id, i.file_kind, i.comment, i.status, i.reason, "
+            "i.created_at, i.handled_at, i.updated_at, "
+            f"{invoice_period_i} AS report_date "
             "FROM invoices i "
             "LEFT JOIN users u ON u.tg_id = i.tg_id "
             "LEFT JOIN suppliers s ON s.id = i.supplier_id "
-            "WHERE i.created_at >= ? AND i.created_at < ? "
-            "ORDER BY i.created_at DESC",
+            f"WHERE {invoice_where_i} "
+            "ORDER BY report_date DESC, i.id DESC",
             (start_iso, end_iso)
         )).fetchall()
         _write_table(
             ws_inv,
             ["id", "tg_id", "Пользователь", "supplier_id", "Поставщик", "Сделка", "Вознаграждение", "file_id", "file_kind",
-             "Комментарий", "Статус", "Причина", "Создано", "Обновлено"],
+             "Комментарий", "Статус", "Причина", "Создано", "Дата решения", "Обновлено", "Дата отчета"],
             [[r["id"], r["tg_id"], r["full_name"], r["supplier_id"], r["supplier_name"], r["deal_amount"], r["reward_amount"],
-              r["file_id"], r["file_kind"], r["comment"], r["status"], r["reason"], r["created_at"], r["updated_at"]] for r in inv_rows],
+              r["file_id"], r["file_kind"], r["comment"], r["status"], r["reason"], r["created_at"], r["handled_at"], r["updated_at"], r["report_date"]] for r in inv_rows],
         )
 
         # Выплаты (период)
@@ -245,6 +267,9 @@ async def build_user_report_xlsx(db_path: str, tg_id: int, start_iso: str, end_i
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
 
+        invoice_where_i = _invoice_period_condition("i")
+        invoice_period_i = _invoice_period_expr("i")
+
         user = await (await db.execute(
             "SELECT tg_id, full_name, phone, reg_type, status, created_at FROM users WHERE tg_id = ?",
             (tg_id,)
@@ -252,9 +277,10 @@ async def build_user_report_xlsx(db_path: str, tg_id: int, start_iso: str, end_i
 
         inv_sums = await (await db.execute(
             "SELECT COUNT(*) AS cnt, "
-            "COALESCE(SUM(COALESCE(deal_amount,0)),0) AS deal_sum, "
-            "COALESCE(SUM(COALESCE(reward_amount,0)),0) AS reward_sum "
-            "FROM invoices WHERE tg_id = ? AND created_at >= ? AND created_at < ?",
+            "COALESCE(SUM(COALESCE(i.deal_amount,0)),0) AS deal_sum, "
+            "COALESCE(SUM(COALESCE(i.reward_amount,0)),0) AS reward_sum "
+            "FROM invoices i "
+            f"WHERE i.tg_id = ? AND {invoice_where_i}",
             (tg_id, start_iso, end_iso)
         )).fetchone()
 
@@ -291,15 +317,18 @@ async def build_user_report_xlsx(db_path: str, tg_id: int, start_iso: str, end_i
 
         ws_inv = wb.create_sheet("Накладные")
         inv_rows = await (await db.execute(
-            "SELECT id, supplier_id, deal_amount, reward_amount, file_id, file_kind, comment, status, reason, created_at, updated_at "
-            "FROM invoices WHERE tg_id = ? AND created_at >= ? AND created_at < ? "
-            "ORDER BY created_at DESC",
+            "SELECT i.id, i.supplier_id, i.deal_amount, i.reward_amount, i.file_id, i.file_kind, "
+            "i.comment, i.status, i.reason, i.created_at, i.handled_at, i.updated_at, "
+            f"{invoice_period_i} AS report_date "
+            "FROM invoices i "
+            f"WHERE i.tg_id = ? AND {invoice_where_i} "
+            "ORDER BY report_date DESC, i.id DESC",
             (tg_id, start_iso, end_iso)
         )).fetchall()
         _write_table(
             ws_inv,
-            ["id", "supplier_id", "Сделка", "Вознаграждение", "file_id", "file_kind", "Комментарий", "Статус", "Причина", "Создано", "Обновлено"],
-            [[r["id"], r["supplier_id"], r["deal_amount"], r["reward_amount"], r["file_id"], r["file_kind"], r["comment"], r["status"], r["reason"], r["created_at"], r["updated_at"]] for r in inv_rows],
+            ["id", "supplier_id", "Сделка", "Вознаграждение", "file_id", "file_kind", "Комментарий", "Статус", "Причина", "Создано", "Дата решения", "Обновлено", "Дата отчета"],
+            [[r["id"], r["supplier_id"], r["deal_amount"], r["reward_amount"], r["file_id"], r["file_kind"], r["comment"], r["status"], r["reason"], r["created_at"], r["handled_at"], r["updated_at"], r["report_date"]] for r in inv_rows],
         )
 
         ws_po = wb.create_sheet("Выплаты")

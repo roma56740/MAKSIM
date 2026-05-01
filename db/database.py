@@ -141,6 +141,7 @@ async def init_db(db_path: str) -> None:
 
                 status TEXT NOT NULL DEFAULT 'pending', -- pending/approved/rejected
                 reason TEXT,
+                handled_at TEXT,
 
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -153,6 +154,23 @@ async def init_db(db_path: str) -> None:
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_tg_id ON invoices(tg_id);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status);")
+
+        cur = await db.execute("PRAGMA table_info(invoices)")
+        invoice_cols = [r[1] for r in await cur.fetchall()]
+        if invoice_cols:
+            if "handled_at" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN handled_at TEXT;")
+
+            await db.execute(
+                """
+                UPDATE invoices
+                SET handled_at = updated_at
+                WHERE handled_at IS NULL
+                  AND status IN ('approved', 'rejected');
+                """
+            )
+
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_handled_at ON invoices(handled_at);")
 
         # --------------------- PAYOUTS (выплаты) ---------------------
         await db.execute(

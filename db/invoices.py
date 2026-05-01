@@ -118,10 +118,10 @@ async def approve_invoice(db_path: str, invoice_id: int, reward_amount: float) -
         await db.execute(
             """
             UPDATE invoices
-            SET status='approved', reward_amount=?, reason=NULL, updated_at=?
+            SET status='approved', reward_amount=?, reason=NULL, handled_at=?, updated_at=?
             WHERE id = ?
             """,
-            (reward_amount, now, invoice_id),
+            (reward_amount, now, now, invoice_id),
         )
         await db.commit()
 
@@ -132,10 +132,10 @@ async def reject_invoice(db_path: str, invoice_id: int, reason: str) -> None:
         await db.execute(
             """
             UPDATE invoices
-            SET status='rejected', reason=?, updated_at=?
+            SET status='rejected', reason=?, handled_at=?, updated_at=?
             WHERE id = ?
             """,
-            (reason, now, invoice_id),
+            (reason, now, now, invoice_id),
         )
         await db.commit()
 
@@ -155,6 +155,7 @@ async def request_invoice_recheck(
                 comment=?,
                 reward_amount=NULL,
                 reason=NULL,
+                handled_at=NULL,
                 updated_at=?
             WHERE id = ?
             """,

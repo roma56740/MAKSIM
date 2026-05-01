@@ -11,10 +11,32 @@ def _sum(v: Any) -> float:
         return 0.0
 
 
+def _invoice_period_expr(alias: str = "i") -> str:
+    prefix = f"{alias}." if alias else ""
+    return (
+        "CASE "
+        f"WHEN {prefix}status IN ('approved', 'rejected') "
+        f"THEN COALESCE({prefix}handled_at, {prefix}updated_at, {prefix}created_at) "
+        f"ELSE {prefix}created_at "
+        "END"
+    )
+
+
+def _invoice_period_condition(alias: str = "i") -> str:
+    expr = _invoice_period_expr(alias)
+    return f"{expr} >= ? AND {expr} < ?"
+
+
 async def get_bot_summary(db_path: str, start_iso: str, end_iso: str) -> Dict[str, Any]:
     """
     Основные метрики по боту за период [start_iso, end_iso).
+
+    Для накладных:
+    - pending считается по дате создания;
+    - approved/rejected считаются по дате решения администратора.
     """
+    invoice_where = _invoice_period_condition("")
+
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
 
@@ -39,14 +61,13 @@ async def get_bot_summary(db_path: str, start_iso: str, end_iso: str) -> Dict[st
                 reg_counts[row["status"]] = row["c"]
 
         invoices_total = (await (await db.execute(
-            "SELECT COUNT(*) AS c FROM invoices WHERE created_at >= ? AND created_at < ?",
+            f"SELECT COUNT(*) AS c FROM invoices WHERE {invoice_where}",
             (start_iso, end_iso),
         )).fetchone())["c"]
 
         inv_counts = {"pending": 0, "approved": 0, "rejected": 0}
         async with db.execute(
-            "SELECT status, COUNT(*) AS c FROM invoices "
-            "WHERE created_at >= ? AND created_at < ? GROUP BY status",
+            f"SELECT status, COUNT(*) AS c FROM invoices WHERE {invoice_where} GROUP BY status",
             (start_iso, end_iso),
         ) as cur:
             async for row in cur:
@@ -56,7 +77,7 @@ async def get_bot_summary(db_path: str, start_iso: str, end_iso: str) -> Dict[st
             "SELECT "
             "COALESCE(SUM(COALESCE(deal_amount,0)),0) AS deal_sum, "
             "COALESCE(SUM(COALESCE(reward_amount,0)),0) AS reward_sum "
-            "FROM invoices WHERE created_at >= ? AND created_at < ?",
+            f"FROM invoices WHERE {invoice_where}",
             (start_iso, end_iso),
         )).fetchone()
         deal_sum = _sum(sums["deal_sum"])
@@ -152,13 +173,15 @@ async def list_active_user_ids(db_path: str) -> List[int]:
 
 
 async def count_user_stats(db_path: str, start_iso: str, end_iso: str) -> int:
-    """Сколько пользователей было активных в периоде (approved + есть любая активность)."""
-    q = """
+    """Сколько пользователей было активных в периоде."""
+    invoice_where = _invoice_period_condition("i")
+
+    q = f"""
     SELECT COUNT(*) AS c
     FROM users u
     WHERE u.status = 'approved'
       AND (
-        EXISTS (SELECT 1 FROM invoices i WHERE i.tg_id = u.tg_id AND i.created_at >= ? AND i.created_at < ?)
+        EXISTS (SELECT 1 FROM invoices i WHERE i.tg_id = u.tg_id AND {invoice_where})
         OR EXISTS (SELECT 1 FROM kp_items k WHERE k.tg_id = u.tg_id AND k.created_at >= ? AND k.created_at < ?)
         OR EXISTS (SELECT 1 FROM payouts p WHERE p.tg_id = u.tg_id AND p.created_at >= ? AND p.created_at < ?)
         OR EXISTS (SELECT 1 FROM registrations r WHERE r.tg_id = u.tg_id AND r.created_at >= ? AND r.created_at < ?)
@@ -173,9 +196,11 @@ async def count_user_stats(db_path: str, start_iso: str, end_iso: str) -> int:
 
 async def list_user_stats(db_path: str, start_iso: str, end_iso: str, limit: int, offset: int) -> List[Dict[str, Any]]:
     """
-    Статистика активных пользователей (approved) за период.
+    Статистика активных пользователей за период.
     """
-    q = """
+    invoice_where = _invoice_period_condition("i")
+
+    q = f"""
     SELECT
         u.tg_id,
         u.full_name,
@@ -184,13 +209,13 @@ async def list_user_stats(db_path: str, start_iso: str, end_iso: str, limit: int
 
         (SELECT COUNT(*) FROM invoices i
             WHERE i.tg_id = u.tg_id
-              AND i.created_at >= ? AND i.created_at < ?) AS invoices_cnt,
+              AND {invoice_where}) AS invoices_cnt,
         (SELECT COALESCE(SUM(COALESCE(i.deal_amount,0)),0) FROM invoices i
             WHERE i.tg_id = u.tg_id
-              AND i.created_at >= ? AND i.created_at < ?) AS deal_sum,
+              AND {invoice_where}) AS deal_sum,
         (SELECT COALESCE(SUM(COALESCE(i.reward_amount,0)),0) FROM invoices i
             WHERE i.tg_id = u.tg_id
-              AND i.created_at >= ? AND i.created_at < ?) AS reward_sum,
+              AND {invoice_where}) AS reward_sum,
 
         (SELECT COUNT(*) FROM kp_items k
             WHERE k.tg_id = u.tg_id
@@ -203,7 +228,7 @@ async def list_user_stats(db_path: str, start_iso: str, end_iso: str, limit: int
     FROM users u
     WHERE u.status = 'approved'
       AND (
-        EXISTS (SELECT 1 FROM invoices i WHERE i.tg_id = u.tg_id AND i.created_at >= ? AND i.created_at < ?)
+        EXISTS (SELECT 1 FROM invoices i WHERE i.tg_id = u.tg_id AND {invoice_where})
         OR EXISTS (SELECT 1 FROM kp_items k WHERE k.tg_id = u.tg_id AND k.created_at >= ? AND k.created_at < ?)
         OR EXISTS (SELECT 1 FROM payouts p WHERE p.tg_id = u.tg_id AND p.created_at >= ? AND p.created_at < ?)
         OR EXISTS (SELECT 1 FROM registrations r WHERE r.tg_id = u.tg_id AND r.created_at >= ? AND r.created_at < ?)
@@ -217,7 +242,6 @@ async def list_user_stats(db_path: str, start_iso: str, end_iso: str, limit: int
         start_iso, end_iso,
         start_iso, end_iso,
         start_iso, end_iso,
-        # activity EXISTS params
         start_iso, end_iso,
         start_iso, end_iso,
         start_iso, end_iso,

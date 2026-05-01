@@ -58,6 +58,7 @@ async def _set_invoice_pending(db_path: str, invoice_id: int) -> None:
                 status='pending',
                 reward_amount=NULL,
                 reason=NULL,
+                handled_at=NULL,
                 updated_at=?
             WHERE id = ?
             """,
