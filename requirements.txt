@@ -21,3 +21,4 @@ beautifulsoup4>=4.12
 lxml>=5.0
 xlrd
 openpyxl
+Pillow>=10.0.0

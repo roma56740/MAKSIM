@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 import aiohttp
 from aiogram import F, Router
+from aiogram.exceptions import TelegramEntityTooLarge
 from aiogram.filters import BaseFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -66,6 +67,12 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
+try:
+    from PIL import Image, ImageOps
+except Exception:
+    Image = None
+    ImageOps = None
+
 
 router = Router()
 log = logging.getLogger(__name__)
@@ -84,6 +91,10 @@ TEXT_MUTED = "#475569"
 BORDER_SOFT = "#E2E8F0"
 HEADER_SOFT = "#F1F5F9"
 
+
+TELEGRAM_DOCUMENT_LIMIT_BYTES = 48 * 1024 * 1024
+KP_IMAGE_MAX_SIDE = 900
+KP_IMAGE_QUALITY = 72
 
 # -------------------- Filter --------------------
 
@@ -274,20 +285,93 @@ def _register_russian_fonts() -> tuple[str, str, str]:
 
 
 
+def _file_size_mb(path: str) -> float:
+    try:
+        return round(os.path.getsize(path) / 1024 / 1024, 2)
+    except Exception:
+        return 0.0
+
+
+def _compress_image_for_pdf(
+    path: str,
+    *,
+    max_side: int = KP_IMAGE_MAX_SIDE,
+    quality: int = KP_IMAGE_QUALITY,
+) -> str:
+    """
+    Сжимает картинку перед вставкой в PDF.
+    Важно: визуальное уменьшение в ReportLab не уменьшает вес исходного файла.
+    """
+    try:
+        if Image is None or ImageOps is None:
+            return path
+
+        src = Path(path)
+        if not src.exists() or not src.is_file():
+            return path
+
+        if src.suffix.lower() == ".svg":
+            return path
+
+        stat = src.stat()
+        cache_dir = Path(_kp_img_dir()) / "compressed"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        out_name = f"{src.stem}_{int(stat.st_mtime)}_{stat.st_size}_{max_side}_{quality}.jpg"
+        out_path = cache_dir / out_name
+
+        if out_path.exists() and out_path.stat().st_size > 0:
+            return str(out_path)
+
+        with Image.open(src) as img:
+            img = ImageOps.exif_transpose(img)
+
+            if img.mode in ("RGBA", "LA", "P"):
+                bg = Image.new("RGB", img.size, "white")
+                if img.mode == "RGBA":
+                    bg.paste(img, mask=img.getchannel("A"))
+                else:
+                    bg.paste(img.convert("RGBA"), mask=img.convert("RGBA").getchannel("A"))
+                img = bg
+            else:
+                img = img.convert("RGB")
+
+            resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            img.thumbnail((max_side, max_side), resampling)
+
+            img.save(
+                out_path,
+                "JPEG",
+                quality=quality,
+                optimize=True,
+                progressive=True,
+            )
+
+        if out_path.exists() and out_path.stat().st_size > 0:
+            if out_path.stat().st_size < stat.st_size:
+                return str(out_path)
+
+        return path
+    except Exception:
+        return path
+
+
 def _fit_image(path: str, max_w_mm: float, max_h_mm: float) -> RLImage:
     max_w = max_w_mm * mm
     max_h = max_h_mm * mm
     try:
-        img_reader = ImageReader(path)
+        safe_path = _compress_image_for_pdf(path)
+        img_reader = ImageReader(safe_path)
         iw, ih = img_reader.getSize()
         if not iw or not ih:
             raise ValueError("bad image size")
         scale = min(max_w / iw, max_h / ih)
         w = iw * scale
         h = ih * scale
-        return RLImage(path, width=w, height=h)
+        return RLImage(safe_path, width=w, height=h)
     except Exception:
-        return RLImage(default_image_path(), width=max_w, height=max_h)
+        fallback = _compress_image_for_pdf(default_image_path())
+        return RLImage(fallback, width=max_w, height=max_h)
 
 
 def _item_title(it: dict[str, Any]) -> str:
@@ -529,7 +613,8 @@ def _draw_header(canvas, doc, font_regular: str, font_bold: str, meta: dict[str,
 
     if logo_path and os.path.exists(logo_path):
         try:
-            img = ImageReader(logo_path)
+            safe_logo_path = _compress_image_for_pdf(logo_path, max_side=700, quality=78)
+            img = ImageReader(safe_logo_path)
             iw, ih = img.getSize()
             target_h = 14 * mm
             scale = target_h / float(ih)
@@ -1608,6 +1693,77 @@ async def kp_qty_input(message: Message, settings: Settings, state: FSMContext) 
 
 # -------------------- Generators --------------------
 
+async def _send_document_safely(
+    bot,
+    chat_id: int,
+    path: str,
+    *,
+    caption: str | None = None,
+) -> bool:
+    if not path or not os.path.exists(path):
+        return False
+
+    if os.path.getsize(path) > TELEGRAM_DOCUMENT_LIMIT_BYTES:
+        return False
+
+    try:
+        await bot.send_document(chat_id, FSInputFile(path), caption=caption)
+        return True
+    except TelegramEntityTooLarge:
+        return False
+    except Exception:
+        log.exception("Failed to send generated document: %s", path)
+        return False
+
+
+async def _send_kp_files(bot, chat_id: int, pdf_path: str, docx_path: str) -> None:
+    pdf_mb = _file_size_mb(pdf_path)
+    docx_mb = _file_size_mb(docx_path)
+
+    pdf_sent = await _send_document_safely(
+        bot,
+        chat_id,
+        pdf_path,
+        caption="✅ КП сформировано. Отправляю PDF и Word.",
+    )
+
+    if pdf_sent:
+        docx_sent = await _send_document_safely(bot, chat_id, docx_path)
+        if not docx_sent:
+            await bot.send_message(
+                chat_id,
+                f"⚠️ PDF отправлен, но Word-файл получился слишком большим для Telegram.\n"
+                f"Размер Word: <b>{docx_mb} МБ</b>.",
+            )
+        return
+
+    docx_sent = await _send_document_safely(
+        bot,
+        chat_id,
+        docx_path,
+        caption=(
+            "⚠️ PDF получился слишком большим для Telegram.\n"
+            "Отправляю Word-версию КП."
+        ),
+    )
+
+    if docx_sent:
+        await bot.send_message(
+            chat_id,
+            f"ℹ️ PDF не отправлен из-за размера.\n"
+            f"Размер PDF: <b>{pdf_mb} МБ</b>.\n\n"
+            "КП отправлено в Word-формате.",
+        )
+        return
+
+    await bot.send_message(
+        chat_id,
+        "❌ КП сформировано, но файлы получились слишком большими для Telegram.\n\n"
+        f"PDF: <b>{pdf_mb} МБ</b>\n"
+        f"Word: <b>{docx_mb} МБ</b>\n\n"
+        "Уменьшите количество позиций или изображения товаров."
+    )
+
 async def _generate_and_send_from_message(
     message: Message,
     settings: Settings,
@@ -1642,9 +1798,7 @@ async def _generate_and_send_from_message(
     await safe_delete_message(message.bot, message.chat.id, progress_mid)
     await safe_delete_message(message.bot, message.chat.id, wizard_mid)
 
-    caption = "✅ КП сформировано. Отправляю PDF и Word."
-    await message.bot.send_document(message.chat.id, FSInputFile(pdf_path), caption=caption)
-    await message.bot.send_document(message.chat.id, FSInputFile(docx_path))
+    await _send_kp_files(message.bot, message.chat.id, pdf_path, docx_path)
 
     await state.clear()
 
@@ -1686,9 +1840,7 @@ async def _generate_and_send(
     mid = int(data.get("wizard_msg_id") or 0)
     await safe_delete_message(call.message.bot, call.message.chat.id, mid)
 
-    caption = "✅ КП сформировано. Отправляю PDF и Word."
-    await call.message.bot.send_document(call.message.chat.id, FSInputFile(pdf_path), caption=caption)
-    await call.message.bot.send_document(call.message.chat.id, FSInputFile(docx_path))
+    await _send_kp_files(call.message.bot, call.message.chat.id, pdf_path, docx_path)
     await call.answer()
 
     await state.clear()
