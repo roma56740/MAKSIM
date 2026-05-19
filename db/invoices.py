@@ -112,16 +112,27 @@ async def list_invoices_for_user(
         return [dict(r) for r in rows]
 
 
-async def approve_invoice(db_path: str, invoice_id: int, reward_amount: float) -> None:
+async def approve_invoice(
+    db_path: str,
+    invoice_id: int,
+    deal_amount: float,
+    reward_amount: float,
+) -> None:
     now = _utcnow()
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
             """
             UPDATE invoices
-            SET status='approved', reward_amount=?, reason=NULL, handled_at=?, updated_at=?
+            SET
+                status='approved',
+                deal_amount=?,
+                reward_amount=?,
+                reason=NULL,
+                handled_at=?,
+                updated_at=?
             WHERE id = ?
             """,
-            (reward_amount, now, now, invoice_id),
+            (deal_amount, reward_amount, now, now, invoice_id),
         )
         await db.commit()
 
@@ -132,7 +143,13 @@ async def reject_invoice(db_path: str, invoice_id: int, reason: str) -> None:
         await db.execute(
             """
             UPDATE invoices
-            SET status='rejected', reason=?, handled_at=?, updated_at=?
+            SET
+                status='rejected',
+                deal_amount=NULL,
+                reward_amount=NULL,
+                reason=?,
+                handled_at=?,
+                updated_at=?
             WHERE id = ?
             """,
             (reason, now, now, invoice_id),
@@ -153,6 +170,7 @@ async def request_invoice_recheck(
             SET
                 status='pending',
                 comment=?,
+                deal_amount=NULL,
                 reward_amount=NULL,
                 reason=NULL,
                 handled_at=NULL,

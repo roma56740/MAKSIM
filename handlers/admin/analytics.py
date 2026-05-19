@@ -248,7 +248,7 @@ def _summary_text(
         f"Одобрено: <b>{summary.get('invoices_approved', 0)}</b> | "
         f"Отклонено: <b>{summary.get('invoices_rejected', 0)}</b>"
     )
-    lines.append(f"• Сумма сделок: <b>{_money(summary.get('deal_sum', 0))}</b> ₽")
+    lines.append(f"• Сумма продаж: <b>{_money(summary.get('deal_sum', 0))}</b> ₽")
     lines.append(f"• Вознаграждение: <b>{_money(summary.get('reward_sum', 0))}</b> ₽")
     lines.append("")
     lines.append("💸 <b>Выплаты</b>")
@@ -525,7 +525,7 @@ async def _build_users_page(
             lines.append(
                 f"{idx}. <b>{name}</b> (<code>{tg_id}</code>)\n"
                 f"   🧾 накладных: <b>{inv_cnt}</b> | 💰 вознаграждение: <b>{reward_sum}</b> ₽\n"
-                f"   🤝 сделки: <b>{deal_sum}</b> ₽ | 🧩 КП позиций: <b>{kp_cnt}</b> | 💸 выплат: <b>{payouts_sum}</b> ₽"
+                f"   🤝 продажи: <b>{deal_sum}</b> ₽ | 🧩 КП позиций: <b>{kp_cnt}</b> | 💸 выплат: <b>{payouts_sum}</b> ₽"
             )
 
     kb = _users_nav_kb(period, page, total_pages, ds, de).as_markup()

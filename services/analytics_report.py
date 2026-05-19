@@ -21,6 +21,13 @@ def _money(v: Any) -> float:
         return 0.0
 
 
+def _percent(deal_amount: Any, reward_amount: Any) -> float | str:
+    deal = _money(deal_amount)
+    reward = _money(reward_amount)
+    if deal <= 0:
+        return ""
+    return round(reward / deal * 100, 2)
+
 def _invoice_period_expr(alias: str = "") -> str:
     prefix = f"{alias}." if alias else ""
     return (
@@ -129,7 +136,7 @@ async def build_admin_report_xlsx(db_path: str, start_iso: str, end_iso: str, pe
         ws_summary.append(["Новых пользователей за период", users_new])
         ws_summary.append(["Заявок на регистрацию за период", reg_total])
         ws_summary.append(["Накладных за период", inv_total])
-        ws_summary.append(["Сумма сделок (₽)", _money(inv_sums["deal_sum"])])
+        ws_summary.append(["Сумма продаж (₽)", _money(inv_sums["deal_sum"])])
         ws_summary.append(["Сумма вознаграждений (₽)", _money(inv_sums["reward_sum"])])
         ws_summary.append(["Запросов на выплаты за период", po_total])
         ws_summary.append(["Сумма выплат (₽)", _money(po_sums["s"])])
@@ -181,9 +188,9 @@ async def build_admin_report_xlsx(db_path: str, start_iso: str, end_iso: str, pe
         )).fetchall()
         _write_table(
             ws_inv,
-            ["id", "tg_id", "Пользователь", "supplier_id", "Поставщик", "Сделка", "Вознаграждение", "file_id", "file_kind",
+            ["id", "tg_id", "Пользователь", "supplier_id", "Поставщик", "Сумма продаж", "Процент", "Вознаграждение", "file_id", "file_kind",
              "Комментарий", "Статус", "Причина", "Создано", "Дата решения", "Обновлено", "Дата отчета"],
-            [[r["id"], r["tg_id"], r["full_name"], r["supplier_id"], r["supplier_name"], r["deal_amount"], r["reward_amount"],
+            [[r["id"], r["tg_id"], r["full_name"], r["supplier_id"], r["supplier_name"], r["deal_amount"], _percent(r["deal_amount"], r["reward_amount"]), r["reward_amount"],
               r["file_id"], r["file_kind"], r["comment"], r["status"], r["reason"], r["created_at"], r["handled_at"], r["updated_at"], r["report_date"]] for r in inv_rows],
         )
 
@@ -303,7 +310,7 @@ async def build_user_report_xlsx(db_path: str, tg_id: int, start_iso: str, end_i
         ws_summary.append(["Статус", _safe(user["status"]) if user else "—"])
         ws_summary.append(["Дата регистрации", _safe(user["created_at"]) if user else "—"])
         ws_summary.append(["Накладных за период", int(inv_sums["cnt"])])
-        ws_summary.append(["Сумма сделок (₽)", _money(inv_sums["deal_sum"])])
+        ws_summary.append(["Сумма продаж (₽)", _money(inv_sums["deal_sum"])])
         ws_summary.append(["Вознаграждение (₽)", _money(inv_sums["reward_sum"])])
         ws_summary.append(["Запросов выплат за период", int(po_sums["cnt"])])
         ws_summary.append(["Сумма выплат (₽)", _money(po_sums["s"])])
@@ -327,8 +334,8 @@ async def build_user_report_xlsx(db_path: str, tg_id: int, start_iso: str, end_i
         )).fetchall()
         _write_table(
             ws_inv,
-            ["id", "supplier_id", "Сделка", "Вознаграждение", "file_id", "file_kind", "Комментарий", "Статус", "Причина", "Создано", "Дата решения", "Обновлено", "Дата отчета"],
-            [[r["id"], r["supplier_id"], r["deal_amount"], r["reward_amount"], r["file_id"], r["file_kind"], r["comment"], r["status"], r["reason"], r["created_at"], r["handled_at"], r["updated_at"], r["report_date"]] for r in inv_rows],
+            ["id", "supplier_id", "Сумма продаж", "Процент", "Вознаграждение", "file_id", "file_kind", "Комментарий", "Статус", "Причина", "Создано", "Дата решения", "Обновлено", "Дата отчета"],
+            [[r["id"], r["supplier_id"], r["deal_amount"], _percent(r["deal_amount"], r["reward_amount"]), r["reward_amount"], r["file_id"], r["file_kind"], r["comment"], r["status"], r["reason"], r["created_at"], r["handled_at"], r["updated_at"], r["report_date"]] for r in inv_rows],
         )
 
         ws_po = wb.create_sheet("Выплаты")

@@ -19,7 +19,8 @@ router = Router()
 
 
 class AdminInvoice(StatesGroup):
-    waiting_reward = State()
+    waiting_deal_amount = State()
+    waiting_reward_percent = State()
     waiting_reject_reason = State()
 
 
@@ -33,7 +34,6 @@ def _parse_amount(text: str) -> float | None:
         return None
     return float(t)
 
-
 def _money(v) -> str:
     if v is None:
         return "—"
@@ -41,6 +41,19 @@ def _money(v) -> str:
         return f"{float(v):,.2f}".replace(",", " ").replace(".", ",")
     except Exception:
         return str(v)
+
+def _percent(v) -> str:
+    if v is None:
+        return "—"
+    try:
+        value = float(v)
+        return f"{value:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+    except Exception:
+        return str(v)
+
+
+def _calc_reward(deal_amount: float, reward_percent: float) -> float:
+    return round(deal_amount * reward_percent / 100, 2)
 
 
 async def _ensure_admin(cbq_or_msg, settings: Settings) -> bool:
@@ -56,6 +69,7 @@ async def _set_invoice_pending(db_path: str, invoice_id: int) -> None:
             UPDATE invoices
             SET
                 status='pending',
+                deal_amount=NULL,
                 reward_amount=NULL,
                 reason=NULL,
                 handled_at=NULL,
@@ -98,7 +112,7 @@ async def admin_invoice_approve(cbq: CallbackQuery, state: FSMContext, settings:
 
     await cbq.answer()
     await state.clear()
-    await state.set_state(AdminInvoice.waiting_reward)
+    await state.set_state(AdminInvoice.waiting_deal_amount)
     await state.update_data(invoice_id=invoice_id)
 
     kb = InlineKeyboardBuilder()
@@ -108,10 +122,10 @@ async def admin_invoice_approve(cbq: CallbackQuery, state: FSMContext, settings:
     await cbq.message.answer(
         "✅ <b>Принятие накладной</b>\n\n"
         f"🆔 <b>#{invoice_id}</b>\n"
-        "🎁 Введите сумму <b>вознаграждения</b> (числом), которая будет начислена в баланс пользователя.",
+        "💰 Введите <b>сумму накладной</b> / сумму продаж числом.\n"
+        "Например: <code>125000</code> или <code>125000,50</code>.",
         reply_markup=kb.as_markup(),
     )
-
 
 @router.callback_query(F.data.startswith("ainv:reject:"))
 async def admin_invoice_reject(cbq: CallbackQuery, state: FSMContext, settings: Settings) -> None:
@@ -179,27 +193,67 @@ async def admin_invoice_cancel(cbq: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
 
 
-@router.message(AdminInvoice.waiting_reward)
-async def admin_reward_input(message: Message, state: FSMContext, settings: Settings) -> None:
+@router.message(AdminInvoice.waiting_deal_amount)
+async def admin_deal_amount_input(message: Message, state: FSMContext, settings: Settings) -> None:
     if not await _ensure_admin(message, settings):
+        return
+
+    deal_amount = _parse_amount(message.text or "")
+    if deal_amount is None or deal_amount <= 0:
+        await message.answer("⚠️ Введите сумму продаж числом. Например: <b>125000</b> или <b>125000,50</b>.")
         return
 
     data = await state.get_data()
     invoice_id = int(data["invoice_id"])
 
-    reward = _parse_amount(message.text or "")
-    if reward is None:
-        await message.answer("⚠️ Введите число (например <b>750</b> или <b>750,50</b>).")
+    await state.update_data(deal_amount=deal_amount)
+    await state.set_state(AdminInvoice.waiting_reward_percent)
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="❌ Отмена", callback_data="ainv:cancel")
+    kb.adjust(1)
+
+    await message.answer(
+        "📈 <b>Процент вознаграждения</b>\n\n"
+        f"🆔 Накладная: <b>#{invoice_id}</b>\n"
+        f"💰 Сумма продаж: <b>{_money(deal_amount)}</b> ₽\n\n"
+        "Введите процент числом. Например: <code>5</code> или <code>7,5</code>.\n"
+        "После ввода бот сам рассчитает сумму вознаграждения.",
+        reply_markup=kb.as_markup(),
+    )
+
+
+@router.message(AdminInvoice.waiting_reward_percent)
+async def admin_reward_percent_input(message: Message, state: FSMContext, settings: Settings) -> None:
+    if not await _ensure_admin(message, settings):
         return
 
-    await approve_invoice(settings.db_path, invoice_id, reward_amount=reward)
+    data = await state.get_data()
+    invoice_id = int(data["invoice_id"])
+    deal_amount = float(data["deal_amount"])
+
+    reward_percent = _parse_amount(message.text or "")
+    if reward_percent is None or reward_percent < 0 or reward_percent > 100:
+        await message.answer("⚠️ Введите процент от 0 до 100. Например: <b>5</b> или <b>7,5</b>.")
+        return
+
+    reward = _calc_reward(deal_amount, reward_percent)
+
+    await approve_invoice(
+        settings.db_path,
+        invoice_id,
+        deal_amount=deal_amount,
+        reward_amount=reward,
+    )
     inv = await get_invoice_full(settings.db_path, invoice_id)
     await state.clear()
 
     await message.answer(
         "✅ <b>Готово!</b>\n"
-        f"Накладная <b>#{invoice_id}</b> принята.\n"
-        f"🎁 Начислено: <b>{_money(reward)}</b>"
+        f"Накладная <b>#{invoice_id}</b> принята.\n\n"
+        f"💰 Сумма продаж: <b>{_money(deal_amount)}</b> ₽\n"
+        f"📈 Процент: <b>{_percent(reward_percent)}</b>%\n"
+        f"🎁 Начислено: <b>{_money(reward)}</b> ₽"
     )
 
     if inv:
@@ -207,7 +261,9 @@ async def admin_reward_input(message: Message, state: FSMContext, settings: Sett
             caption = (
                 "✅ <b>Ваша накладная принята!</b>\n\n"
                 f"🆔 Номер: <b>#{invoice_id}</b>\n"
-                f"🎁 Вознаграждение: <b>{_money(reward)}</b>\n\n"
+                f"💰 Сумма продаж: <b>{_money(deal_amount)}</b> ₽\n"
+                f"📈 Процент: <b>{_percent(reward_percent)}</b>%\n"
+                f"🎁 Вознаграждение: <b>{_money(reward)}</b> ₽\n\n"
                 "Баланс обновлён 💰\n\n"
                 "Если есть расхождение, нажмите кнопку ниже."
             )

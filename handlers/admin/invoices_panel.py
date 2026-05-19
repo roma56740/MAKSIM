@@ -45,6 +45,17 @@ def _money(v) -> str:
         return str(v)
 
 
+def _percent(deal_amount, reward_amount) -> str:
+    try:
+        deal = float(deal_amount or 0)
+        reward = float(reward_amount or 0)
+        if deal <= 0:
+            return "—"
+        value = reward / deal * 100
+        return f"{value:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+    except Exception:
+        return "—"
+
 def _panel_text(
     status: str,
     items: list[dict],
@@ -87,7 +98,11 @@ def _panel_text(
         )
 
         if status == "approved":
-            block += f"\n🎁 Вознаграждение: <b>{_money(it.get('reward_amount'))}</b>"
+            block += (
+                f"\n💰 Продажи: <b>{_money(it.get('deal_amount'))}</b> ₽"
+                f"\n📈 Процент: <b>{_percent(it.get('deal_amount'), it.get('reward_amount'))}</b>%"
+                f"\n🎁 Вознаграждение: <b>{_money(it.get('reward_amount'))}</b> ₽"
+            )
 
         if status == "rejected":
             block += f"\n🧾 Причина: <b>{it.get('reason') or '—'}</b>"
@@ -224,7 +239,11 @@ async def admin_open_invoice_file(cbq: CallbackQuery, settings: Settings) -> Non
     )
 
     if status == "approved":
-        caption += f"\n🎁 Вознаграждение: <b>{_money(inv.get('reward_amount'))}</b>"
+        caption += (
+            f"\n💰 Продажи: <b>{_money(inv.get('deal_amount'))}</b> ₽"
+            f"\n📈 Процент: <b>{_percent(inv.get('deal_amount'), inv.get('reward_amount'))}</b>%"
+            f"\n🎁 Вознаграждение: <b>{_money(inv.get('reward_amount'))}</b> ₽"
+        )
 
     if status == "rejected":
         caption += f"\n🧾 Причина: <b>{inv.get('reason') or '—'}</b>"

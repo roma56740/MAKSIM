@@ -60,6 +60,12 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.fonts import addMapping
 from xml.sax.saxutils import escape as xml_escape
 
+# EXCEL (openpyxl)
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+
 # WORD (python-docx)
 from docx import Document
 from docx.shared import Mm, Pt
@@ -1120,6 +1126,205 @@ def create_kp_docx(
     doc.save(out_path)
 
 
+# -------------------- XLSX helpers --------------------
+
+def _xlsx_item_code(it: dict[str, Any]) -> str:
+    code = (
+        it.get("code")
+        or it.get("article")
+        or it.get("sku")
+        or it.get("vendor_code")
+        or (it.get("product_code") if isinstance(it.get("product_code"), str) else None)
+        or ""
+    )
+    return str(code).strip()
+
+
+def _xlsx_price_value(it: dict[str, Any]) -> float | None:
+    raw = it.get("final_price") if it.get("final_price") not in (None, "") else it.get("price")
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except Exception:
+        return None
+
+
+def _xlsx_qty_value(it: dict[str, Any]) -> int | None:
+    raw = it.get("doc_qty")
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _prepare_image_for_xlsx(path: str | None) -> str:
+    img_path = (path or "").strip()
+    if not img_path or not os.path.exists(img_path):
+        img_path = default_image_path()
+
+    if Image is None or ImageOps is None:
+        return img_path
+
+    try:
+        src = Path(img_path)
+        if not src.exists() or not src.is_file():
+            return default_image_path()
+
+        cache_dir = Path(_kp_img_dir()) / "xlsx"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        stat = src.stat()
+        out_path = cache_dir / f"{src.stem}_{int(stat.st_mtime)}_{stat.st_size}_xlsx.jpg"
+
+        if out_path.exists() and out_path.stat().st_size > 0:
+            return str(out_path)
+
+        with Image.open(src) as img:
+            img = ImageOps.exif_transpose(img)
+
+            if img.mode in ("RGBA", "LA", "P"):
+                bg = Image.new("RGB", img.size, "white")
+                if img.mode == "RGBA":
+                    bg.paste(img, mask=img.getchannel("A"))
+                else:
+                    rgba = img.convert("RGBA")
+                    bg.paste(rgba, mask=rgba.getchannel("A"))
+                img = bg
+            else:
+                img = img.convert("RGB")
+
+            resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            img.thumbnail((260, 260), resampling)
+            img.save(out_path, "JPEG", quality=84, optimize=True)
+
+        return str(out_path) if out_path.exists() else img_path
+    except Exception:
+        return default_image_path()
+
+
+def _style_xlsx_sheet(ws) -> None:
+    header_fill = PatternFill("solid", fgColor=HEADER_SOFT.replace("#", ""))
+    header_font = Font(bold=True, color=TEXT_DARK.replace("#", ""))
+    thin = Side(style="thin", color=BORDER_SOFT.replace("#", ""))
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = border
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.border = border
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+    widths = {
+        "A": 16,
+        "B": 18,
+        "C": 38,
+        "D": 55,
+        "E": 12,
+        "F": 16,
+        "G": 16,
+        "H": 16,
+        "I": 38,
+        "J": 32,
+        "K": 32,
+    }
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+
+    ws.freeze_panes = "B2"
+    ws.auto_filter.ref = ws.dimensions
+
+
+def create_kp_xlsx(
+    *,
+    out_path: str,
+    user: dict[str, Any] | None,
+    items: list[dict[str, Any]],
+    logo_path: str | None,
+) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "КП"
+
+    headers = [
+        "Фото",
+        "Артикул",
+        "Название",
+        "Описание",
+        "Кол-во",
+        "Цена из прайса",
+        "Ручная цена",
+        "Сумма",
+        "Ссылка",
+        "Комментарий менеджера",
+        "Примечание",
+    ]
+    ws.append(headers)
+    ws.row_dimensions[1].height = 30
+
+    for idx, it in enumerate(items, start=2):
+        qty = _xlsx_qty_value(it)
+        price = _xlsx_price_value(it)
+        title = _item_title(it)
+        desc = (it.get("description") or "").strip()
+        url = (it.get("url") or "").strip()
+
+        ws.cell(row=idx, column=2, value=_xlsx_item_code(it))
+        ws.cell(row=idx, column=3, value=title)
+        ws.cell(row=idx, column=4, value=desc)
+        ws.cell(row=idx, column=5, value=qty)
+        ws.cell(row=idx, column=6, value=price)
+        ws.cell(row=idx, column=7, value=None)
+        ws.cell(
+            row=idx,
+            column=8,
+            value=f'=IF(OR(E{idx}="",IF(G{idx}<>"",G{idx},F{idx})=""),"",E{idx}*IF(G{idx}<>"",G{idx},F{idx}))',
+        )
+        ws.cell(row=idx, column=9, value=url)
+        ws.cell(row=idx, column=10, value="")
+        ws.cell(row=idx, column=11, value="")
+
+        for col in (6, 7, 8):
+            ws.cell(row=idx, column=col).number_format = '# ##0.00'
+
+        img_path = (it.get("image_path") or "").strip()
+        if not img_path or not os.path.exists(img_path):
+            img_path = default_image_path()
+        img_path = _prepare_image_for_xlsx(img_path)
+
+        try:
+            ximg = XLImage(img_path)
+            ximg.width = 92
+            ximg.height = 72
+            ws.add_image(ximg, f"A{idx}")
+        except Exception:
+            pass
+
+        ws.row_dimensions[idx].height = 62
+
+    total_row = len(items) + 2
+    ws.cell(row=total_row, column=3, value="ИТОГО")
+    ws.cell(row=total_row, column=3).font = Font(bold=True)
+    ws.cell(row=total_row, column=5, value=f"=SUM(E2:E{total_row - 1})")
+    ws.cell(row=total_row, column=8, value=f"=SUM(H2:H{total_row - 1})")
+    ws.cell(row=total_row, column=8).number_format = '# ##0.00'
+
+    _style_xlsx_sheet(ws)
+
+    for col_idx in range(1, len(headers) + 1):
+        ws.cell(row=total_row, column=col_idx).border = ws.cell(row=1, column=col_idx).border
+        ws.cell(row=total_row, column=col_idx).alignment = Alignment(vertical="center", wrap_text=True)
+
+    wb.save(out_path)
+
+
 # -------------------- Wizard UI --------------------
 
 def _mode_kb() -> InlineKeyboardBuilder:
@@ -1716,43 +1921,43 @@ async def _send_document_safely(
         return False
 
 
-async def _send_kp_files(bot, chat_id: int, pdf_path: str, docx_path: str) -> None:
+async def _send_kp_files(bot, chat_id: int, pdf_path: str, xlsx_path: str) -> None:
     pdf_mb = _file_size_mb(pdf_path)
-    docx_mb = _file_size_mb(docx_path)
+    xlsx_mb = _file_size_mb(xlsx_path)
 
     pdf_sent = await _send_document_safely(
         bot,
         chat_id,
         pdf_path,
-        caption="✅ КП сформировано. Отправляю PDF и Word.",
+        caption="✅ КП сформировано. Отправляю PDF и Excel.",
     )
 
     if pdf_sent:
-        docx_sent = await _send_document_safely(bot, chat_id, docx_path)
-        if not docx_sent:
+        xlsx_sent = await _send_document_safely(bot, chat_id, xlsx_path)
+        if not xlsx_sent:
             await bot.send_message(
                 chat_id,
-                f"⚠️ PDF отправлен, но Word-файл получился слишком большим для Telegram.\n"
-                f"Размер Word: <b>{docx_mb} МБ</b>.",
+                f"⚠️ PDF отправлен, но Excel-файл получился слишком большим для Telegram.\n"
+                f"Размер Excel: <b>{xlsx_mb} МБ</b>.",
             )
         return
 
-    docx_sent = await _send_document_safely(
+    xlsx_sent = await _send_document_safely(
         bot,
         chat_id,
-        docx_path,
+        xlsx_path,
         caption=(
             "⚠️ PDF получился слишком большим для Telegram.\n"
-            "Отправляю Word-версию КП."
+            "Отправляю Excel-версию КП."
         ),
     )
 
-    if docx_sent:
+    if xlsx_sent:
         await bot.send_message(
             chat_id,
             f"ℹ️ PDF не отправлен из-за размера.\n"
             f"Размер PDF: <b>{pdf_mb} МБ</b>.\n\n"
-            "КП отправлено в Word-формате.",
+            "КП отправлено в Excel-формате.",
         )
         return
 
@@ -1760,7 +1965,7 @@ async def _send_kp_files(bot, chat_id: int, pdf_path: str, docx_path: str) -> No
         chat_id,
         "❌ КП сформировано, но файлы получились слишком большими для Telegram.\n\n"
         f"PDF: <b>{pdf_mb} МБ</b>\n"
-        f"Word: <b>{docx_mb} МБ</b>\n\n"
+        f"Excel: <b>{xlsx_mb} МБ</b>\n\n"
         "Уменьшите количество позиций или изображения товаров."
     )
 
@@ -1777,12 +1982,12 @@ async def _generate_and_send_from_message(
     logo_path = _find_logo_path()
     base = _build_base_filename()
     pdf_path = os.path.join(_kp_dir(), f"{base}.pdf")
-    docx_path = os.path.join(_kp_dir(), f"{base}.docx")
+    xlsx_path = os.path.join(_kp_dir(), f"{base}.xlsx")
 
     try:
         await _prepare_items_for_docs(uid, items)
         create_kp_pdf(out_path=pdf_path, user=user, items=items, logo_path=logo_path)
-        create_kp_docx(out_path=docx_path, user=user, items=items, logo_path=logo_path)
+        create_kp_xlsx(out_path=xlsx_path, user=user, items=items, logo_path=logo_path)
     except Exception:
         log.exception("KP build failed")
         await safe_delete_message(message.bot, message.chat.id, progress_mid)
@@ -1798,7 +2003,7 @@ async def _generate_and_send_from_message(
     await safe_delete_message(message.bot, message.chat.id, progress_mid)
     await safe_delete_message(message.bot, message.chat.id, wizard_mid)
 
-    await _send_kp_files(message.bot, message.chat.id, pdf_path, docx_path)
+    await _send_kp_files(message.bot, message.chat.id, pdf_path, xlsx_path)
 
     await state.clear()
 
@@ -1813,16 +2018,16 @@ async def _generate_and_send(
     logo_path = _find_logo_path()
     base = _build_base_filename()
     pdf_path = os.path.join(_kp_dir(), f"{base}.pdf")
-    docx_path = os.path.join(_kp_dir(), f"{base}.docx")
+    xlsx_path = os.path.join(_kp_dir(), f"{base}.xlsx")
 
-    await safe_edit_text(call.message, "⏳ Формирую PDF и Word…", reply_markup=None)
+    await safe_edit_text(call.message, "⏳ Формирую PDF и Excel…", reply_markup=None)
 
     uid = call.from_user.id
 
     try:
         await _prepare_items_for_docs(uid, items)
         create_kp_pdf(out_path=pdf_path, user=user, items=items, logo_path=logo_path)
-        create_kp_docx(out_path=docx_path, user=user, items=items, logo_path=logo_path)
+        create_kp_xlsx(out_path=xlsx_path, user=user, items=items, logo_path=logo_path)
     except Exception:
         log.exception("KP build failed")
         await safe_edit_text(
@@ -1840,7 +2045,7 @@ async def _generate_and_send(
     mid = int(data.get("wizard_msg_id") or 0)
     await safe_delete_message(call.message.bot, call.message.chat.id, mid)
 
-    await _send_kp_files(call.message.bot, call.message.chat.id, pdf_path, docx_path)
+    await _send_kp_files(call.message.bot, call.message.chat.id, pdf_path, xlsx_path)
     await call.answer()
 
     await state.clear()
