@@ -15,12 +15,146 @@ from config import Settings
 from db import is_admin, list_user_ids
 from keyboards.admin import admin_back_cancel_kb, admin_main_kb
 
+
 router = Router()
+
+PHOTO_CAPTION_LIMIT = 1000
+DOCUMENT_CAPTION_LIMIT = 1000
+TEXT_MESSAGE_LIMIT = 3900
 
 
 class BroadcastForm(StatesGroup):
     content = State()
     confirm = State()
+
+
+def _split_long_text(text: str, limit: int = TEXT_MESSAGE_LIMIT) -> list[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    chunks: list[str] = []
+    current = ""
+
+    for part in text.split("\n"):
+        part = part.strip()
+
+        if len(part) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+
+            for i in range(0, len(part), limit):
+                chunk = part[i:i + limit].strip()
+                if chunk:
+                    chunks.append(chunk)
+            continue
+
+        candidate = part if not current else f"{current}\n{part}"
+
+        if len(candidate) <= limit:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            current = part
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+async def _answer_text_safely(message: Message, text: str) -> None:
+    for chunk in _split_long_text(text):
+        await message.answer(chunk)
+
+
+async def _bot_send_text_safely(bot, chat_id: int, text: str) -> None:
+    chunks = _split_long_text(text)
+    if not chunks:
+        return
+
+    for chunk in chunks:
+        await bot.send_message(chat_id=chat_id, text=chunk)
+
+
+async def _answer_photo_with_safe_caption(
+    message: Message,
+    photo_file_id: str,
+    caption: str | None = None,
+) -> None:
+    caption = (caption or "").strip()
+
+    if len(caption) <= PHOTO_CAPTION_LIMIT:
+        await message.answer_photo(photo_file_id, caption=caption or None)
+        return
+
+    await message.answer_photo(photo_file_id, caption="🖼 Фото для рассылки")
+    await _answer_text_safely(message, caption)
+
+
+async def _answer_document_with_safe_caption(
+    message: Message,
+    document_file_id: str,
+    caption: str | None = None,
+) -> None:
+    caption = (caption or "").strip()
+
+    if len(caption) <= DOCUMENT_CAPTION_LIMIT:
+        await message.answer_document(document_file_id, caption=caption or None)
+        return
+
+    await message.answer_document(document_file_id, caption="📎 Файл для рассылки")
+    await _answer_text_safely(message, caption)
+
+
+async def _bot_send_photo_with_safe_caption(
+    bot,
+    chat_id: int,
+    photo_file_id: str,
+    caption: str | None = None,
+) -> None:
+    caption = (caption or "").strip()
+
+    if len(caption) <= PHOTO_CAPTION_LIMIT:
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=photo_file_id,
+            caption=caption or None,
+        )
+        return
+
+    await bot.send_photo(
+        chat_id=chat_id,
+        photo=photo_file_id,
+        caption="🖼 Фото",
+    )
+    await _bot_send_text_safely(bot, chat_id, caption)
+
+
+async def _bot_send_document_with_safe_caption(
+    bot,
+    chat_id: int,
+    document_file_id: str,
+    caption: str | None = None,
+) -> None:
+    caption = (caption or "").strip()
+
+    if len(caption) <= DOCUMENT_CAPTION_LIMIT:
+        await bot.send_document(
+            chat_id=chat_id,
+            document=document_file_id,
+            caption=caption or None,
+        )
+        return
+
+    await bot.send_document(
+        chat_id=chat_id,
+        document=document_file_id,
+        caption="📎 Файл",
+    )
+    await _bot_send_text_safely(bot, chat_id, caption)
 
 
 def _confirm_kb():
@@ -117,7 +251,11 @@ async def broadcast_take_photo(message: Message, state: FSMContext) -> None:
     )
 
     await message.answer("👁 <b>Предпросмотр</b>:")
-    await message.answer_photo(message.photo[-1].file_id, caption=message.caption or "")
+    await _answer_photo_with_safe_caption(
+        message,
+        message.photo[-1].file_id,
+        message.caption or "",
+    )
     await message.answer("Подтвердите отправку:", reply_markup=_confirm_kb())
 
     await state.set_state(BroadcastForm.confirm)
@@ -132,7 +270,11 @@ async def broadcast_take_document(message: Message, state: FSMContext) -> None:
     )
 
     await message.answer("👁 <b>Предпросмотр</b>:")
-    await message.answer_document(message.document.file_id, caption=message.caption or "")
+    await _answer_document_with_safe_caption(
+        message,
+        message.document.file_id,
+        message.caption or "",
+    )
     await message.answer("Подтвердите отправку:", reply_markup=_confirm_kb())
 
     await state.set_state(BroadcastForm.confirm)
@@ -148,7 +290,7 @@ async def broadcast_take_text(message: Message, state: FSMContext) -> None:
     await state.update_data(kind="text", file_id=None, text=text)
 
     await message.answer("👁 <b>Предпросмотр</b>:")
-    await message.answer(text)
+    await _answer_text_safely(message, text)
     await message.answer("Подтвердите отправку:", reply_markup=_confirm_kb())
 
     await state.set_state(BroadcastForm.confirm)
@@ -196,11 +338,24 @@ async def broadcast_send(call: CallbackQuery, state: FSMContext, settings: Setti
     for uid in user_ids:
         try:
             if kind == "text":
-                await call.bot.send_message(uid, text)
+                await _bot_send_text_safely(call.bot, uid, text)
+
             elif kind == "photo":
-                await call.bot.send_photo(uid, file_id, caption=text)
+                await _bot_send_photo_with_safe_caption(
+                    call.bot,
+                    uid,
+                    file_id,
+                    text,
+                )
+
             elif kind == "document":
-                await call.bot.send_document(uid, file_id, caption=text)
+                await _bot_send_document_with_safe_caption(
+                    call.bot,
+                    uid,
+                    file_id,
+                    text,
+                )
+
             else:
                 fail += 1
                 failed_rows.append((uid, f"unsupported kind: {kind}"))

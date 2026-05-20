@@ -5,7 +5,8 @@ import asyncio
 import logging
 import os
 import re
-import time
+import time 
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1319,8 +1320,13 @@ def create_kp_xlsx(
     _style_xlsx_sheet(ws)
 
     for col_idx in range(1, len(headers) + 1):
-        ws.cell(row=total_row, column=col_idx).border = ws.cell(row=1, column=col_idx).border
-        ws.cell(row=total_row, column=col_idx).alignment = Alignment(vertical="center", wrap_text=True)
+        src_cell = ws.cell(row=1, column=col_idx)
+        dst_cell = ws.cell(row=total_row, column=col_idx)
+
+        dst_cell.border = copy(src_cell.border)
+        dst_cell.fill = copy(src_cell.fill)
+        dst_cell.font = copy(src_cell.font)
+        dst_cell.alignment = Alignment(vertical="center", wrap_text=True)
 
     wb.save(out_path)
 
