@@ -508,6 +508,235 @@ async def block_user(db_path: str, tg_id: int) -> None:
         await db.commit()
 
 
+async def count_admin_users(db_path: str, status: str = "all") -> int:
+    where = ""
+    params: list[Any] = []
+
+    if status != "all":
+        where = "WHERE status = ?"
+        params.append(status)
+
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute(f"SELECT COUNT(1) FROM users {where}", tuple(params))
+        row = await cur.fetchone()
+        return int(row[0] if row else 0)
+
+
+async def list_admin_users(
+    db_path: str,
+    status: str = "all",
+    limit: int = 8,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    where = ""
+    params: list[Any] = []
+
+    if status != "all":
+        where = "WHERE u.status = ?"
+        params.append(status)
+
+    params.extend([int(limit), int(offset)])
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            f"""
+            SELECT
+                u.tg_id,
+                u.full_name,
+                u.phone,
+                u.reg_type,
+                u.status,
+                u.created_at,
+                u.updated_at,
+
+                (SELECT COUNT(1) FROM invoices i WHERE i.tg_id = u.tg_id) AS invoices_total,
+                (SELECT COALESCE(SUM(CASE WHEN i.status='approved' THEN COALESCE(i.reward_amount,0) ELSE 0 END),0)
+                    FROM invoices i WHERE i.tg_id = u.tg_id) AS reward_sum,
+                (SELECT COUNT(1) FROM bills b WHERE b.tg_id = u.tg_id) AS bills_total,
+                (SELECT COUNT(1) FROM kp_items k WHERE k.tg_id = u.tg_id) AS kp_items_total,
+                (SELECT COUNT(1) FROM support_threads st WHERE st.user_id = u.tg_id AND st.status='active') AS active_chats
+            FROM users u
+            {where}
+            ORDER BY
+                CASE u.status
+                    WHEN 'pending' THEN 1
+                    WHEN 'approved' THEN 2
+                    WHEN 'rejected' THEN 3
+                    WHEN 'blocked' THEN 4
+                    ELSE 5
+                END,
+                u.updated_at DESC,
+                u.created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def get_admin_user_analytics(db_path: str, tg_id: int) -> dict[str, Any] | None:
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+
+        user = await (await db.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))).fetchone()
+        if not user:
+            return None
+
+        registration = await (await db.execute(
+            "SELECT * FROM registrations WHERE tg_id = ?",
+            (tg_id,),
+        )).fetchone()
+
+        invoices = await (await db.execute(
+            """
+            SELECT
+                COUNT(1) AS total,
+                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) AS approved,
+                SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected,
+                COALESCE(SUM(CASE WHEN status='approved' THEN COALESCE(deal_amount,0) ELSE 0 END),0) AS approved_deal_sum,
+                COALESCE(SUM(CASE WHEN status='approved' THEN COALESCE(reward_amount,0) ELSE 0 END),0) AS approved_reward_sum,
+                COALESCE(SUM(CASE WHEN status='pending' THEN COALESCE(deal_amount,0) ELSE 0 END),0) AS pending_deal_sum,
+                MAX(COALESCE(handled_at, updated_at, created_at)) AS last_at
+            FROM invoices
+            WHERE tg_id = ?
+            """,
+            (tg_id,),
+        )).fetchone()
+
+        payouts = await (await db.execute(
+            """
+            SELECT
+                COUNT(1) AS total,
+                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END) AS paid,
+                SUM(CASE WHEN status IN ('rejected','canceled') THEN 1 ELSE 0 END) AS rejected,
+                COALESCE(SUM(CASE WHEN status='paid' THEN COALESCE(amount,0) ELSE 0 END),0) AS paid_sum,
+                COALESCE(SUM(CASE WHEN status='pending' THEN COALESCE(amount,0) ELSE 0 END),0) AS pending_sum,
+                MAX(COALESCE(paid_at, updated_at, created_at)) AS last_at
+            FROM payouts
+            WHERE tg_id = ?
+            """,
+            (tg_id,),
+        )).fetchone()
+
+        bills = await (await db.execute(
+            """
+            SELECT
+                COUNT(1) AS total,
+                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END) AS paid,
+                SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected,
+                MAX(COALESCE(paid_at, updated_at, created_at)) AS last_at
+            FROM bills
+            WHERE tg_id = ?
+            """,
+            (tg_id,),
+        )).fetchone()
+
+        kp = await (await db.execute(
+            """
+            SELECT
+                COUNT(1) AS items_total,
+                COALESCE(SUM(COALESCE(qty,1)),0) AS qty_total,
+                COALESCE(SUM(COALESCE(final_price, price, 0) * COALESCE(qty,1)),0) AS sum_total,
+                COUNT(DISTINCT supplier_id) AS suppliers_total,
+                MAX(updated_at) AS last_at
+            FROM kp_items
+            WHERE tg_id = ?
+            """,
+            (tg_id,),
+        )).fetchone()
+
+        kp_session = await (await db.execute(
+            """
+            SELECT
+                ks.tg_id,
+                ks.supplier_id,
+                ks.created_at,
+                ks.updated_at,
+                s.name AS supplier_name
+            FROM kp_sessions ks
+            LEFT JOIN suppliers s ON s.id = ks.supplier_id
+            WHERE ks.tg_id = ?
+            """,
+            (tg_id,),
+        )).fetchone()
+
+        ai = await (await db.execute(
+            """
+            SELECT
+                COUNT(1) AS messages_total,
+                SUM(CASE WHEN role='user' THEN 1 ELSE 0 END) AS user_messages,
+                SUM(CASE WHEN role='assistant' THEN 1 ELSE 0 END) AS assistant_messages,
+                MAX(created_at) AS last_at
+            FROM ai_dialog_messages
+            WHERE tg_id = ?
+            """,
+            (tg_id,),
+        )).fetchone()
+
+        ai_searches = await (await db.execute(
+            """
+            SELECT COUNT(1) AS total, MAX(created_at) AS last_at
+            FROM ai_product_search_sessions
+            WHERE tg_id = ?
+            """,
+            (tg_id,),
+        )).fetchone()
+
+        support = await (await db.execute(
+            """
+            SELECT
+                COUNT(1) AS threads_total,
+                SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active_threads,
+                SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) AS closed_threads,
+                MAX(updated_at) AS last_at
+            FROM support_threads
+            WHERE user_id = ?
+            """,
+            (tg_id,),
+        )).fetchone()
+
+        support_messages = await (await db.execute(
+            """
+            SELECT COUNT(1) AS messages_total, MAX(sm.created_at) AS last_at
+            FROM support_messages sm
+            INNER JOIN support_threads st ON st.id = sm.thread_id
+            WHERE st.user_id = ?
+            """,
+            (tg_id,),
+        )).fetchone()
+
+        inv_d = dict(invoices) if invoices else {}
+        pay_d = dict(payouts) if payouts else {}
+
+        earned = float(inv_d.get("approved_reward_sum") or 0.0)
+        paid = float(pay_d.get("paid_sum") or 0.0)
+
+        return {
+            "user": dict(user),
+            "registration": dict(registration) if registration else None,
+            "invoices": inv_d,
+            "payouts": pay_d,
+            "bills": dict(bills) if bills else {},
+            "kp": dict(kp) if kp else {},
+            "kp_session": dict(kp_session) if kp_session else None,
+            "ai": dict(ai) if ai else {},
+            "ai_searches": dict(ai_searches) if ai_searches else {},
+            "support": dict(support) if support else {},
+            "support_messages": dict(support_messages) if support_messages else {},
+            "balance": {
+                "earned": earned,
+                "paid": paid,
+                "available": earned - paid,
+                "pending_payouts": float(pay_d.get("pending_sum") or 0.0),
+            },
+        }
+
+
 # --------------------- SUPPLIERS ---------------------
 
 async def count_suppliers(db_path: str) -> int:

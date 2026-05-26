@@ -22,6 +22,7 @@ from handlers.admin.db_export import router as admin_db_export_router
 from handlers.admin.invoices_panel import router as admin_invoices_panel_router
 from handlers.admin.invoices import router as admin_invoices_router
 from handlers.admin.analytics import router as admin_analytics_router
+from handlers.admin.users import router as admin_users_router
 from handlers.admin.broadcast import router as admin_broadcast_router
 from handlers.admin.admins import router as admin_admins_router
 from handlers.admin.suppliers import router as admin_suppliers_router
@@ -65,6 +66,7 @@ async def main() -> None:
     dp.include_router(admin_invoices_router)
     dp.include_router(admin_bills_router)  # ✅ НОВОЕ
     dp.include_router(admin_analytics_router)
+    dp.include_router(admin_users_router)
     dp.include_router(admin_broadcast_router)
     dp.include_router(admin_admins_router)
     dp.include_router(admin_suppliers_router)

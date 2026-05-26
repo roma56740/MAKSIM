@@ -19,6 +19,13 @@ class AdminsCb(CallbackData, prefix="admins"):
     tg_id: int
 
 
+class AdminUsersCb(CallbackData, prefix="ausers"):
+    action: str            # list/view/filter/back/menu
+    page: int = 1
+    tg_id: int = 0
+    status: str = "all"    # all/approved/pending/rejected/blocked
+
+
 class BroadcastCb(CallbackData, prefix="bcast"):
     action: str  # send/cancel
 
