@@ -6,6 +6,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from config import load_settings
 from db import init_db
+from db.surveys import init_surveys_db
 from services.image_store import ensure_default_image
 
 # user
@@ -16,6 +17,7 @@ from handlers.user.kp_build import router as kp_build_router
 from handlers.user.profile import router as user_profile_router
 from handlers.user.invoices import router as user_invoices_router
 from handlers.user.bills import router as user_bills_router  # ✅ НОВОЕ
+from handlers.user.surveys import router as user_surveys_router
 
 # admin
 from handlers.admin.db_export import router as admin_db_export_router
@@ -30,6 +32,7 @@ from handlers.admin.prices import router as admin_prices_router
 from handlers.admin.products import router as admin_products_router
 from handlers.admin.registration import router as admin_reg_router
 from handlers.admin.bills import router as admin_bills_router  # ✅ НОВОЕ
+from handlers.admin.surveys import router as admin_surveys_router
 from handlers.user.ai_chat import router as user_ai_chat_router
 from handlers.admin.ai import router as admin_ai_router  # ✅ ИИ
 
@@ -42,6 +45,7 @@ async def main() -> None:
     logging.info("DB_PATH = %s", settings.db_path)
 
     await init_db(settings.db_path)
+    await init_surveys_db(settings.db_path)
     ensure_default_image()
 
     bot = Bot(
@@ -60,6 +64,7 @@ async def main() -> None:
     dp.include_router(user_invoices_router)
     dp.include_router(user_bills_router)  # ✅ НОВОЕ
     dp.include_router(user_admin_chat_router)      # ✅ чат с админом
+    dp.include_router(user_surveys_router)         # ✅ ответы на опросы
 
     # admin
     dp.include_router(admin_invoices_panel_router)
@@ -68,6 +73,7 @@ async def main() -> None:
     dp.include_router(admin_analytics_router)
     dp.include_router(admin_users_router)
     dp.include_router(admin_broadcast_router)
+    dp.include_router(admin_surveys_router)  # ✅ опросы
     dp.include_router(admin_admins_router)
     dp.include_router(admin_suppliers_router)
     dp.include_router(admin_prices_router)

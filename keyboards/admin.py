@@ -3,6 +3,7 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 BTN_ADMIN_CHATS = "💬 Чаты"
 BTN_CHAT_CLOSE = "🔒 Закрыть чат"
 BTN_ADMIN_USERS = "👥 Все пользователи"
+BTN_ADMIN_SURVEYS = "🗳 Опросы"
 
 
 def admin_main_kb() -> ReplyKeyboardMarkup:
@@ -12,8 +13,8 @@ def admin_main_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🧾 Накладные"), KeyboardButton(text="💳 Счета")],
             [KeyboardButton(text="🏢 Поставщики"), KeyboardButton(text="📦 Excel-прайсы")],
             [KeyboardButton(text="📊 Аналитика"), KeyboardButton(text=BTN_ADMIN_USERS)],
-            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text=BTN_ADMIN_CHATS)],
-            [KeyboardButton(text="👥 Админы")],
+            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text=BTN_ADMIN_SURVEYS)],
+            [KeyboardButton(text=BTN_ADMIN_CHATS), KeyboardButton(text="👥 Админы")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Админ-меню",
