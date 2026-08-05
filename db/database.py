@@ -167,6 +167,18 @@ async def init_db(db_path: str) -> None:
         if invoice_cols:
             if "handled_at" not in invoice_cols:
                 await db.execute("ALTER TABLE invoices ADD COLUMN handled_at TEXT;")
+            if "source_file_name" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN source_file_name TEXT;")
+            if "source_mime_type" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN source_mime_type TEXT;")
+            if "analysis_status" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN analysis_status TEXT NOT NULL DEFAULT 'pending';")
+            if "analysis_json" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN analysis_json TEXT;")
+            if "analysis_error" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN analysis_error TEXT;")
+            if "analyzed_at" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN analyzed_at TEXT;")
 
             await db.execute(
                 """
@@ -178,6 +190,7 @@ async def init_db(db_path: str) -> None:
             )
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_handled_at ON invoices(handled_at);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_analysis_status ON invoices(analysis_status);")
 
         # --------------------- INVOICE ITEMS (товары из накладных) ---------------------
         await db.execute(

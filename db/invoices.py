@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from typing import Any
 
 import aiosqlite
@@ -19,6 +20,9 @@ async def create_invoice(
     tg_id: int,
     file_id: str,
     file_kind: str,
+    *,
+    source_file_name: str | None = None,
+    source_mime_type: str | None = None,
 ) -> int:
     now = _utcnow()
     async with aiosqlite.connect(db_path) as db:
@@ -26,15 +30,77 @@ async def create_invoice(
             """
             INSERT INTO invoices (
                 tg_id, supplier_id, deal_amount, reward_amount,
-                file_id, file_kind, comment,
-                status, reason,
+                file_id, file_kind, source_file_name, source_mime_type, comment,
+                status, reason, analysis_status, analysis_json, analysis_error, analyzed_at,
                 created_at, updated_at
-            ) VALUES (?, NULL, NULL, NULL, ?, ?, NULL, 'pending', NULL, ?, ?)
+            ) VALUES (?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, 'pending', NULL, 'pending', NULL, NULL, NULL, ?, ?)
             """,
-            (tg_id, file_id, file_kind, now, now),
+            (tg_id, file_id, file_kind, source_file_name, source_mime_type, now, now),
         )
         await db.commit()
         return int(cur.lastrowid)
+
+
+
+
+async def mark_invoice_analysis_processing(db_path: str, invoice_id: int) -> None:
+    now = _utcnow()
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            UPDATE invoices
+            SET analysis_status='processing', analysis_error=NULL, updated_at=?
+            WHERE id=?
+            """,
+            (now, invoice_id),
+        )
+        await db.commit()
+
+
+async def save_invoice_analysis(
+    db_path: str,
+    invoice_id: int,
+    analysis: dict[str, Any],
+) -> None:
+    now = _utcnow()
+    payload = json.dumps(analysis, ensure_ascii=False, separators=(",", ":"))
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            UPDATE invoices
+            SET analysis_status='completed', analysis_json=?, analysis_error=NULL, analyzed_at=?, updated_at=?
+            WHERE id=?
+            """,
+            (payload, now, now, invoice_id),
+        )
+        await db.commit()
+
+
+async def fail_invoice_analysis(db_path: str, invoice_id: int, error: str) -> None:
+    now = _utcnow()
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            UPDATE invoices
+            SET analysis_status='failed', analysis_error=?, analyzed_at=?, updated_at=?
+            WHERE id=?
+            """,
+            (str(error)[:700], now, now, invoice_id),
+        )
+        await db.commit()
+
+
+def decode_invoice_analysis(invoice: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not invoice:
+        return None
+    raw = invoice.get("analysis_json")
+    if not raw:
+        return None
+    try:
+        value = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 async def get_invoice_full(db_path: str, invoice_id: int) -> dict[str, Any] | None:

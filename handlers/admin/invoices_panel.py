@@ -9,7 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import Settings
 from db import is_admin
-from db.invoices import get_invoice_full, list_invoice_items
+from db.invoices import decode_invoice_analysis, get_invoice_full, list_invoice_items
 from db.invoices_admin import count_invoices_by_status, list_invoices_by_status
 from filters.admin import IsAdmin
 
@@ -56,6 +56,18 @@ def _percent(deal_amount, reward_amount) -> str:
     except Exception:
         return "—"
 
+
+def _analysis_badge(invoice: dict) -> str:
+    status = str(invoice.get("analysis_status") or "pending")
+    analysis = decode_invoice_analysis(invoice)
+    if status == "completed" and analysis:
+        return f"🤖 Распознано: <b>{len(analysis.get('items') or [])}</b> поз."
+    if status == "failed":
+        return "⚠️ Распознавание не завершено"
+    if status == "processing":
+        return "🔎 Идёт распознавание"
+    return "⏳ Ожидает распознавания"
+
 def _panel_text(
     status: str,
     items: list[dict],
@@ -92,9 +104,10 @@ def _panel_text(
 
         block = (
             f"{_status_badge(it.get('status', status))} <b>#{inv_id}</b>\n"
-            f"👤 {user_name}\n"
-            f"📱 {phone}\n"
-            f"🕒 {created}"
+            f"👤 {html.escape(str(user_name))}\n"
+            f"📱 {html.escape(str(phone))}\n"
+            f"🕒 {created}\n"
+            f"{_analysis_badge(it)}"
         )
 
         if status == "approved":
@@ -139,7 +152,7 @@ def _panel_kb(status: str, page: int, total_pages: int, items: list[dict]) -> In
         if status == "pending":
             kb.row(
                 InlineKeyboardButton(text=f"📎 Открыть #{inv_id}", callback_data=f"ainv:open:{inv_id}"),
-                InlineKeyboardButton(text=f"✅ Принять #{inv_id}", callback_data=f"ainv:approve:{inv_id}"),
+                InlineKeyboardButton(text=f"🔎 Проверить #{inv_id}", callback_data=f"ainv:approve:{inv_id}"),
                 InlineKeyboardButton(text=f"❌ Отклонить #{inv_id}", callback_data=f"ainv:reject:{inv_id}"),
             )
         elif status == "approved":
@@ -173,9 +186,10 @@ def _detail_kb(invoice_id: int, status: str) -> InlineKeyboardBuilder:
 
     if status == "pending":
         kb.row(
-            InlineKeyboardButton(text="✅ Принять", callback_data=f"ainv:approve:{invoice_id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"ainv:reject:{invoice_id}"),
+            InlineKeyboardButton(text="🔎 Проверить", callback_data=f"ainv:approve:{invoice_id}"),
+            InlineKeyboardButton(text="🔄 Распознать заново", callback_data=f"ainv:retry:{invoice_id}"),
         )
+        kb.row(InlineKeyboardButton(text="❌ Отклонить", callback_data=f"ainv:reject:{invoice_id}"))
     elif status == "approved":
         kb.row(
             InlineKeyboardButton(text="🟡 На проверку", callback_data=f"ainv:pending:{invoice_id}"),
@@ -233,9 +247,10 @@ async def admin_open_invoice_file(cbq: CallbackQuery, settings: Settings) -> Non
     caption = (
         f"📎 <b>Накладная #{invoice_id}</b>\n"
         f"{_status_badge(status)}\n\n"
-        f"👤 <b>{inv.get('user_full_name') or '—'}</b>\n"
-        f"📱 <b>{inv.get('user_phone') or '—'}</b>\n"
-        f"🕒 {inv.get('created_at') or '—'}"
+        f"👤 <b>{html.escape(str(inv.get('user_full_name') or '—'))}</b>\n"
+        f"📱 <b>{html.escape(str(inv.get('user_phone') or '—'))}</b>\n"
+        f"🕒 {inv.get('created_at') or '—'}\n"
+        f"{_analysis_badge(inv)}"
     )
 
     if status == "approved":

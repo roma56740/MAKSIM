@@ -15,12 +15,20 @@ from db.invoices import (
     create_invoice,
     count_invoices_for_user,
     count_user_invoices_by_status,
+    decode_invoice_analysis,
     get_invoice_full,
     list_invoice_items,
     list_invoices_for_user,
     request_invoice_recheck,
 )
 from keyboards.user import user_back_cancel_kb, user_main_kb
+from services.invoice_recognition import InvoiceRecognitionError, normalize_mime_type
+from services.invoice_workflow import (
+    analysis_header,
+    analyze_invoice_from_telegram,
+    money,
+    split_item_messages,
+)
 
 router = Router()
 router.message.filter(NotAdmin())
@@ -131,23 +139,37 @@ async def _notify_admins_new_invoice(message: Message, settings: Settings, invoi
     user_name = inv.get("user_full_name") or "—"
     user_phone = inv.get("user_phone") or "—"
     tg_id = inv.get("tg_id")
-    comment = (inv.get("comment") or "").strip()[:700]
+    comment = (inv.get("comment") or "").strip()[:350]
+    analysis = decode_invoice_analysis(inv)
+    analysis_status = str(inv.get("analysis_status") or "pending")
 
     caption = (
         ("🔁 <b>Накладная повторно отправлена на проверку</b>\n\n" if comment else "🧾 <b>Новая накладная на проверку</b>\n\n")
         + f"🆔 Накладная: <b>#{invoice_id}</b>\n"
-        + f"👤 Пользователь: <b>{user_name}</b> (<code>{tg_id}</code>)\n"
-        + f"📱 Телефон: <b>{user_phone}</b>\n"
+        + f"👤 Пользователь: <b>{html.escape(str(user_name))}</b> (<code>{tg_id}</code>)\n"
+        + f"📱 Телефон: <b>{html.escape(str(user_phone))}</b>\n"
         + f"🕒 {inv.get('created_at') or '—'}"
     )
+
+    if analysis_status == "completed" and analysis:
+        caption += (
+            "\n\n🤖 <b>ИИ распознал документ</b>"
+            f"\n📦 Позиций: <b>{len(analysis.get('items') or [])}</b>"
+            f"\n💰 Сумма: <b>{money(analysis.get('calculated_total'))}</b> {html.escape(str(analysis.get('currency') or 'RUB'))}"
+        )
+    elif analysis_status == "failed":
+        caption += "\n\n⚠️ <b>Автораспознавание не завершено.</b> Администратор может запустить его повторно."
+    else:
+        caption += "\n\n🔎 <b>Документ обрабатывается.</b>"
 
     if comment:
         caption += f"\n\n💬 <b>Комментарий менеджера:</b>\n{html.escape(comment)}"
 
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Принять", callback_data=f"ainv:approve:{invoice_id}")
+    kb.button(text="🔎 Проверить данные", callback_data=f"ainv:approve:{invoice_id}")
+    kb.button(text="🔄 Распознать заново", callback_data=f"ainv:retry:{invoice_id}")
     kb.button(text="❌ Отклонить", callback_data=f"ainv:reject:{invoice_id}")
-    kb.adjust(2)
+    kb.adjust(1, 2)
 
     file_id = inv.get("file_id")
     kind = (inv.get("file_kind") or "").lower()
@@ -160,6 +182,7 @@ async def _notify_admins_new_invoice(message: Message, settings: Settings, invoi
                 await message.bot.send_document(admin_id, file_id, caption=caption, reply_markup=kb.as_markup())
         except Exception:
             continue
+
 
 @router.message(F.text == "🧾 Накладные")
 async def invoices_root(message: Message, settings: Settings) -> None:
@@ -197,20 +220,70 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
     if message.photo:
         file_id = message.photo[-1].file_id
         file_kind = "photo"
+        source_file_name = f"invoice_{message.from_user.id}.jpg"
+        source_mime_type = "image/jpeg"
     else:
         file_id = message.document.file_id
         file_kind = "document"
+        source_file_name = message.document.file_name or f"invoice_{message.from_user.id}"
+        source_mime_type = normalize_mime_type(source_file_name, message.document.mime_type)
+        if source_mime_type not in {"application/pdf", "image/jpeg", "image/png", "image/webp"}:
+            await message.answer(
+                "⚠️ Отправьте накладную в формате <b>PDF, JPG, PNG или WEBP</b>."
+            )
+            return
 
-    invoice_id = await create_invoice(settings.db_path, message.from_user.id, file_id, file_kind)
+    invoice_id = await create_invoice(
+        settings.db_path,
+        message.from_user.id,
+        file_id,
+        file_kind,
+        source_file_name=source_file_name,
+        source_mime_type=source_mime_type,
+    )
     await state.clear()
 
-    await message.answer(
-        "✅ <b>Накладная отправлена!</b>\n\n"
-        f"🆔 Номер: <b>#{invoice_id}</b>\n"
-        "🟡 Статус: <b>На проверке</b>\n\n"
-        "Когда админ примет решение — вы получите уведомление 🔔",
-        reply_markup=user_main_kb(),
+    progress = await message.answer(
+        "🔎 <b>Анализирую накладную…</b>\n\n"
+        "Распознаю номер, дату, товары, количество, цены и итоговую сумму. "
+        "Для большой накладной это может занять до минуты."
     )
+
+    try:
+        analysis = await analyze_invoice_from_telegram(
+            message.bot, settings.db_path, invoice_id
+        )
+        try:
+            await progress.edit_text(
+                "✅ <b>Накладная распознана</b>\n\n"
+                "Проверьте краткий результат ниже. Администратор сможет принять данные "
+                "или исправить позиции перед начислением."
+            )
+        except Exception:
+            pass
+
+        await message.answer(analysis_header(analysis, invoice_id=invoice_id))
+        for chunk in split_item_messages(analysis):
+            await message.answer(chunk)
+        await message.answer(
+            "🟡 <b>Отправлено администратору на проверку</b>\n\n"
+            "После решения вы получите уведомление 🔔",
+            reply_markup=user_main_kb(),
+        )
+    except InvoiceRecognitionError as exc:
+        try:
+            await progress.edit_text(
+                "⚠️ <b>Автоматически распознать накладную не удалось</b>\n\n"
+                f"{html.escape(str(exc))}\n\n"
+                "Файл сохранён и отправлен администратору. Он сможет запустить распознавание повторно.",
+                reply_markup=user_main_kb(),
+            )
+        except Exception:
+            await message.answer(
+                "⚠️ Автоматически распознать накладную не удалось. "
+                "Файл сохранён и отправлен администратору.",
+                reply_markup=user_main_kb(),
+            )
 
     await _notify_admins_new_invoice(message, settings, invoice_id)
 
