@@ -19,7 +19,7 @@ router = Router()
 
 
 class AdminInvoice(StatesGroup):
-    waiting_deal_amount = State()
+    waiting_items = State()
     waiting_reward_percent = State()
     waiting_reject_reason = State()
 
@@ -33,6 +33,40 @@ def _parse_amount(text: str) -> float | None:
     if not re.fullmatch(r"\d+(\.\d+)?", t):
         return None
     return float(t)
+
+
+def _parse_invoice_items(text: str) -> tuple[list[dict], str | None]:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return [], "Добавьте хотя бы одну товарную позицию."
+    if len(lines) > 100:
+        return [], "В одной накладной можно указать не более 100 позиций."
+
+    items: list[dict] = []
+    for index, raw_line in enumerate(lines, start=1):
+        line = re.sub(r"^\s*\d+[.)]\s*", "", raw_line)
+        parts = [part.strip() for part in re.split(r"[|;]", line)]
+        if len(parts) != 3:
+            return [], (
+                f"Строка {index} заполнена неверно. Используйте формат: "
+                "Название | количество | цена"
+            )
+        product_name, quantity_text, price_text = parts
+        quantity = _parse_amount(quantity_text)
+        unit_price = _parse_amount(price_text)
+        if len(product_name) < 2:
+            return [], f"В строке {index} не указано название товара."
+        if quantity is None or quantity <= 0:
+            return [], f"В строке {index} неверно указано количество."
+        if unit_price is None or unit_price < 0:
+            return [], f"В строке {index} неверно указана цена."
+        items.append({
+            "product_name": product_name[:250],
+            "quantity": quantity,
+            "unit_price": unit_price,
+            "line_total": round(quantity * unit_price, 2),
+        })
+    return items, None
 
 def _money(v) -> str:
     if v is None:
@@ -64,6 +98,7 @@ async def _ensure_admin(cbq_or_msg, settings: Settings) -> bool:
 async def _set_invoice_pending(db_path: str, invoice_id: int) -> None:
     now = _utcnow()
     async with aiosqlite.connect(db_path) as db:
+        await db.execute("DELETE FROM invoice_items WHERE invoice_id = ?", (invoice_id,))
         await db.execute(
             """
             UPDATE invoices
@@ -112,7 +147,7 @@ async def admin_invoice_approve(cbq: CallbackQuery, state: FSMContext, settings:
 
     await cbq.answer()
     await state.clear()
-    await state.set_state(AdminInvoice.waiting_deal_amount)
+    await state.set_state(AdminInvoice.waiting_items)
     await state.update_data(invoice_id=invoice_id)
 
     kb = InlineKeyboardBuilder()
@@ -122,8 +157,12 @@ async def admin_invoice_approve(cbq: CallbackQuery, state: FSMContext, settings:
     await cbq.message.answer(
         "✅ <b>Принятие накладной</b>\n\n"
         f"🆔 <b>#{invoice_id}</b>\n"
-        "💰 Введите <b>сумму накладной</b> / сумму продаж числом.\n"
-        "Например: <code>125000</code> или <code>125000,50</code>.",
+        "Введите товары из накладной — <b>каждый товар с новой строки</b>.\n\n"
+        "Формат: <code>Название | количество | цена продажи</code>\n"
+        "Пример:\n"
+        "<code>Вода 0,5 л | 10 | 120\n"
+        "Сок яблочный | 3 | 250,50</code>\n\n"
+        "Сумма накладной будет рассчитана автоматически.",
         reply_markup=kb.as_markup(),
     )
 
@@ -193,20 +232,22 @@ async def admin_invoice_cancel(cbq: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
 
 
-@router.message(AdminInvoice.waiting_deal_amount)
-async def admin_deal_amount_input(message: Message, state: FSMContext, settings: Settings) -> None:
+@router.message(AdminInvoice.waiting_items)
+async def admin_invoice_items_input(message: Message, state: FSMContext, settings: Settings) -> None:
     if not await _ensure_admin(message, settings):
         return
 
-    deal_amount = _parse_amount(message.text or "")
-    if deal_amount is None or deal_amount <= 0:
-        await message.answer("⚠️ Введите сумму продаж числом. Например: <b>125000</b> или <b>125000,50</b>.")
+    items, error = _parse_invoice_items(message.text or "")
+    if error:
+        await message.answer(f"⚠️ {error}")
         return
 
     data = await state.get_data()
     invoice_id = int(data["invoice_id"])
+    deal_amount = round(sum(float(item["line_total"]) for item in items), 2)
+    total_qty = sum(float(item["quantity"]) for item in items)
 
-    await state.update_data(deal_amount=deal_amount)
+    await state.update_data(deal_amount=deal_amount, items=items)
     await state.set_state(AdminInvoice.waiting_reward_percent)
 
     kb = InlineKeyboardBuilder()
@@ -216,9 +257,11 @@ async def admin_deal_amount_input(message: Message, state: FSMContext, settings:
     await message.answer(
         "📈 <b>Процент вознаграждения</b>\n\n"
         f"🆔 Накладная: <b>#{invoice_id}</b>\n"
+        f"📦 Позиций: <b>{len(items)}</b>\n"
+        f"🔢 Количество товаров: <b>{_percent(total_qty)}</b>\n"
         f"💰 Сумма продаж: <b>{_money(deal_amount)}</b> ₽\n\n"
         "Введите процент числом. Например: <code>5</code> или <code>7,5</code>.\n"
-        "После ввода бот сам рассчитает сумму вознаграждения.",
+        "После ввода бот рассчитает сумму вознаграждения.",
         reply_markup=kb.as_markup(),
     )
 
@@ -231,6 +274,7 @@ async def admin_reward_percent_input(message: Message, state: FSMContext, settin
     data = await state.get_data()
     invoice_id = int(data["invoice_id"])
     deal_amount = float(data["deal_amount"])
+    items = list(data.get("items") or [])
 
     reward_percent = _parse_amount(message.text or "")
     if reward_percent is None or reward_percent < 0 or reward_percent > 100:
@@ -244,6 +288,7 @@ async def admin_reward_percent_input(message: Message, state: FSMContext, settin
         invoice_id,
         deal_amount=deal_amount,
         reward_amount=reward,
+        items=items,
     )
     inv = await get_invoice_full(settings.db_path, invoice_id)
     await state.clear()
@@ -251,6 +296,7 @@ async def admin_reward_percent_input(message: Message, state: FSMContext, settin
     await message.answer(
         "✅ <b>Готово!</b>\n"
         f"Накладная <b>#{invoice_id}</b> принята.\n\n"
+        f"📦 Товарных позиций: <b>{len(items)}</b>\n"
         f"💰 Сумма продаж: <b>{_money(deal_amount)}</b> ₽\n"
         f"📈 Процент: <b>{_percent(reward_percent)}</b>%\n"
         f"🎁 Начислено: <b>{_money(reward)}</b> ₽"
@@ -261,6 +307,7 @@ async def admin_reward_percent_input(message: Message, state: FSMContext, settin
             caption = (
                 "✅ <b>Ваша накладная принята!</b>\n\n"
                 f"🆔 Номер: <b>#{invoice_id}</b>\n"
+                f"📦 Товарных позиций: <b>{len(items)}</b>\n"
                 f"💰 Сумма продаж: <b>{_money(deal_amount)}</b> ₽\n"
                 f"📈 Процент: <b>{_percent(reward_percent)}</b>%\n"
                 f"🎁 Вознаграждение: <b>{_money(reward)}</b> ₽\n\n"

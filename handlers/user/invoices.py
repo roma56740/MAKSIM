@@ -16,6 +16,7 @@ from db.invoices import (
     count_invoices_for_user,
     count_user_invoices_by_status,
     get_invoice_full,
+    list_invoice_items,
     list_invoices_for_user,
     request_invoice_recheck,
 )
@@ -104,6 +105,7 @@ def _list_text(title: str, status: str, page: int, total_pages: int, items: list
             reward = it.get("reward_amount")
             reward_txt = "—" if reward is None else f"{float(reward):,.2f}".replace(",", " ").replace(".", ",")
             block += f"\n🎁 Вознаграждение: <b>{reward_txt}</b>"
+            block += f"\n📦 Позиций: <b>{int(it.get('items_count') or 0)}</b>"
 
         if status == "rejected":
             reason = it.get("reason") or "—"
@@ -268,6 +270,20 @@ async def invoice_open_file(cbq: CallbackQuery, settings: Settings) -> None:
         return
 
     caption = f"📎 Накладная <b>#{invoice_id}</b> • {_status_badge(inv.get('status', 'pending'))}"
+
+    items = await list_invoice_items(settings.db_path, invoice_id)
+    if items:
+        caption += "\n\n📦 <b>Товары:</b>"
+        for item in items[:6]:
+            qty = f"{float(item['quantity']):g}"
+            price = f"{float(item['unit_price']):,.2f}".replace(",", " ").replace(".", ",")
+            total = f"{float(item['line_total']):,.2f}".replace(",", " ").replace(".", ",")
+            product_name = str(item["product_name"])
+            if len(product_name) > 45:
+                product_name = product_name[:42] + "…"
+            caption += f"\n• {html.escape(product_name)} — {qty} × {price} ₽ = <b>{total} ₽</b>"
+        if len(items) > 6:
+            caption += f"\n… ещё {len(items) - 6} позиций"
 
     kb = None
     if inv.get("status") == "approved":

@@ -9,7 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import Settings
 from db import is_admin
-from db.invoices import get_invoice_full
+from db.invoices import get_invoice_full, list_invoice_items
 from db.invoices_admin import count_invoices_by_status, list_invoices_by_status
 from filters.admin import IsAdmin
 
@@ -244,6 +244,23 @@ async def admin_open_invoice_file(cbq: CallbackQuery, settings: Settings) -> Non
             f"\n📈 Процент: <b>{_percent(inv.get('deal_amount'), inv.get('reward_amount'))}</b>%"
             f"\n🎁 Вознаграждение: <b>{_money(inv.get('reward_amount'))}</b> ₽"
         )
+
+    if status == "approved":
+        invoice_items = await list_invoice_items(settings.db_path, invoice_id)
+        if invoice_items:
+            caption += "\n\n📦 <b>Товары:</b>"
+            for item in invoice_items[:6]:
+                qty = f"{float(item['quantity']):g}"
+                product_name = str(item["product_name"])
+                if len(product_name) > 45:
+                    product_name = product_name[:42] + "…"
+                caption += (
+                    f"\n• {html.escape(product_name)} — "
+                    f"{qty} × {_money(item['unit_price'])} ₽ = "
+                    f"<b>{_money(item['line_total'])} ₽</b>"
+                )
+            if len(invoice_items) > 6:
+                caption += f"\n… ещё {len(invoice_items) - 6} позиций"
 
     if status == "rejected":
         caption += f"\n🧾 Причина: <b>{inv.get('reason') or '—'}</b>"

@@ -126,6 +126,13 @@ async def build_admin_report_xlsx(db_path: str, start_iso: str, end_iso: str, pe
             (start_iso, end_iso)
         )).fetchone()
 
+        item_sums = await (await db.execute(
+            "SELECT COALESCE(SUM(ii.quantity),0) AS qty, COUNT(ii.id) AS lines "
+            "FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id "
+            f"WHERE i.status='approved' AND {invoice_where_i}",
+            (start_iso, end_iso),
+        )).fetchone()
+
         price_uploads = (await (await db.execute(
             "SELECT COUNT(*) AS c FROM supplier_prices WHERE uploaded_at >= ? AND uploaded_at < ?",
             (start_iso, end_iso)
@@ -138,6 +145,8 @@ async def build_admin_report_xlsx(db_path: str, start_iso: str, end_iso: str, pe
         ws_summary.append(["Накладных за период", inv_total])
         ws_summary.append(["Сумма продаж (₽)", _money(inv_sums["deal_sum"])])
         ws_summary.append(["Сумма вознаграждений (₽)", _money(inv_sums["reward_sum"])])
+        ws_summary.append(["Товарных строк в накладных", int(item_sums["lines"] or 0)])
+        ws_summary.append(["Продано единиц товара", _money(item_sums["qty"])])
         ws_summary.append(["Запросов на выплаты за период", po_total])
         ws_summary.append(["Сумма выплат (₽)", _money(po_sums["s"])])
         ws_summary.append(["Загружено Excel-прайсов за период", price_uploads])
@@ -192,6 +201,91 @@ async def build_admin_report_xlsx(db_path: str, start_iso: str, end_iso: str, pe
              "Комментарий", "Статус", "Причина", "Создано", "Дата решения", "Обновлено", "Дата отчета"],
             [[r["id"], r["tg_id"], r["full_name"], r["supplier_id"], r["supplier_name"], r["deal_amount"], _percent(r["deal_amount"], r["reward_amount"]), r["reward_amount"],
               r["file_id"], r["file_kind"], r["comment"], r["status"], r["reason"], r["created_at"], r["handled_at"], r["updated_at"], r["report_date"]] for r in inv_rows],
+        )
+
+
+        # Сводная по менеджерам
+        ws_mgr = wb.create_sheet("Сводная менеджеры")
+        manager_rows = await (await db.execute(
+            "WITH inv AS ("
+            "  SELECT i.id, i.tg_id, i.deal_amount, i.reward_amount "
+            "  FROM invoices i "
+            f"  WHERE i.status='approved' AND {invoice_where_i}"
+            "), item_agg AS ("
+            "  SELECT invoice_id, COUNT(id) AS item_lines, "
+            "         COALESCE(SUM(quantity),0) AS items_qty, "
+            "         COALESCE(SUM(line_total),0) AS items_sum "
+            "  FROM invoice_items GROUP BY invoice_id"
+            ") "
+            "SELECT inv.tg_id, u.full_name, u.phone, "
+            "       COUNT(inv.id) AS invoices_count, "
+            "       COALESCE(SUM(inv.deal_amount),0) AS deal_sum, "
+            "       COALESCE(SUM(inv.reward_amount),0) AS reward_sum, "
+            "       COALESCE(SUM(item_agg.item_lines),0) AS item_lines, "
+            "       COALESCE(SUM(item_agg.items_qty),0) AS items_qty, "
+            "       COALESCE(SUM(item_agg.items_sum),0) AS items_sum "
+            "FROM inv "
+            "LEFT JOIN users u ON u.tg_id = inv.tg_id "
+            "LEFT JOIN item_agg ON item_agg.invoice_id = inv.id "
+            "GROUP BY inv.tg_id, u.full_name, u.phone "
+            "ORDER BY deal_sum DESC, reward_sum DESC",
+            (start_iso, end_iso),
+        )).fetchall()
+        _write_table(
+            ws_mgr,
+            ["tg_id", "Менеджер", "Телефон", "Накладных", "Сумма накладных",
+             "Вознаграждение", "Товарных строк", "Продано единиц", "Сумма товаров"],
+            [[r["tg_id"], r["full_name"], r["phone"], r["invoices_count"], r["deal_sum"],
+              r["reward_sum"], r["item_lines"], r["items_qty"], r["items_sum"]] for r in manager_rows],
+        )
+
+        # Сводная одинаковых товаров по каждому менеджеру
+        ws_product_summary = wb.create_sheet("Товары менеджеров")
+        product_summary_rows = await (await db.execute(
+            "SELECT i.tg_id, u.full_name, MIN(ii.product_name) AS product_name, "
+            "       COALESCE(SUM(ii.quantity),0) AS quantity, "
+            "       MIN(ii.unit_price) AS min_price, MAX(ii.unit_price) AS max_price, "
+            "       CASE WHEN SUM(ii.quantity) > 0 "
+            "            THEN SUM(ii.line_total) / SUM(ii.quantity) ELSE 0 END AS avg_price, "
+            "       COALESCE(SUM(ii.line_total),0) AS total_sum "
+            "FROM invoice_items ii "
+            "JOIN invoices i ON i.id = ii.invoice_id "
+            "LEFT JOIN users u ON u.tg_id = i.tg_id "
+            f"WHERE i.status='approved' AND {invoice_where_i} "
+            "GROUP BY i.tg_id, COALESCE(NULLIF(ii.product_key, ''), LOWER(TRIM(ii.product_name))) "
+            "ORDER BY u.full_name COLLATE NOCASE, total_sum DESC",
+            (start_iso, end_iso),
+        )).fetchall()
+        _write_table(
+            ws_product_summary,
+            ["tg_id", "Менеджер", "Товар", "Количество", "Мин. цена", "Макс. цена",
+             "Средняя цена продажи", "Общая сумма"],
+            [[r["tg_id"], r["full_name"], r["product_name"], r["quantity"], r["min_price"],
+              r["max_price"], r["avg_price"], r["total_sum"]] for r in product_summary_rows],
+        )
+
+        # Подробные товары по каждой накладной
+        ws_items = wb.create_sheet("Товары детально")
+        item_rows = await (await db.execute(
+            "SELECT ii.id, ii.invoice_id, i.tg_id, u.full_name, ii.product_name, "
+            "       ii.quantity, ii.unit_price, ii.line_total, i.deal_amount, "
+            "       i.reward_amount, i.created_at, i.handled_at, "
+            f"       {invoice_period_i} AS report_date "
+            "FROM invoice_items ii "
+            "JOIN invoices i ON i.id = ii.invoice_id "
+            "LEFT JOIN users u ON u.tg_id = i.tg_id "
+            f"WHERE i.status='approved' AND {invoice_where_i} "
+            "ORDER BY report_date DESC, ii.invoice_id DESC, ii.id ASC",
+            (start_iso, end_iso),
+        )).fetchall()
+        _write_table(
+            ws_items,
+            ["id", "Накладная", "tg_id", "Менеджер", "Товар", "Количество",
+             "Цена продажи", "Сумма товара", "Сумма накладной", "Вознаграждение",
+             "Создано", "Дата решения", "Дата отчета"],
+            [[r["id"], r["invoice_id"], r["tg_id"], r["full_name"], r["product_name"],
+              r["quantity"], r["unit_price"], r["line_total"], r["deal_amount"],
+              r["reward_amount"], r["created_at"], r["handled_at"], r["report_date"]] for r in item_rows],
         )
 
         # Выплаты (период)
@@ -302,6 +396,13 @@ async def build_user_report_xlsx(db_path: str, tg_id: int, start_iso: str, end_i
             (tg_id, start_iso, end_iso)
         )).fetchone())["c"]
 
+        user_item_sums = await (await db.execute(
+            "SELECT COALESCE(SUM(ii.quantity),0) AS qty, COUNT(ii.id) AS lines "
+            "FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id "
+            f"WHERE i.tg_id = ? AND i.status='approved' AND {invoice_where_i}",
+            (tg_id, start_iso, end_iso),
+        )).fetchone()
+
         ws_summary.append(["Период (ISO)", f"{start_iso} → {end_iso}"])
         ws_summary.append(["tg_id", tg_id])
         ws_summary.append(["ФИО", _safe(user["full_name"]) if user else "—"])
@@ -312,6 +413,8 @@ async def build_user_report_xlsx(db_path: str, tg_id: int, start_iso: str, end_i
         ws_summary.append(["Накладных за период", int(inv_sums["cnt"])])
         ws_summary.append(["Сумма продаж (₽)", _money(inv_sums["deal_sum"])])
         ws_summary.append(["Вознаграждение (₽)", _money(inv_sums["reward_sum"])])
+        ws_summary.append(["Товарных строк", int(user_item_sums["lines"] or 0)])
+        ws_summary.append(["Продано единиц товара", _money(user_item_sums["qty"])])
         ws_summary.append(["Запросов выплат за период", int(po_sums["cnt"])])
         ws_summary.append(["Сумма выплат (₽)", _money(po_sums["s"])])
         ws_summary.append(["Позиции КП за период", int(kp_cnt)])
@@ -336,6 +439,45 @@ async def build_user_report_xlsx(db_path: str, tg_id: int, start_iso: str, end_i
             ws_inv,
             ["id", "supplier_id", "Сумма продаж", "Процент", "Вознаграждение", "file_id", "file_kind", "Комментарий", "Статус", "Причина", "Создано", "Дата решения", "Обновлено", "Дата отчета"],
             [[r["id"], r["supplier_id"], r["deal_amount"], _percent(r["deal_amount"], r["reward_amount"]), r["reward_amount"], r["file_id"], r["file_kind"], r["comment"], r["status"], r["reason"], r["created_at"], r["handled_at"], r["updated_at"], r["report_date"]] for r in inv_rows],
+        )
+
+
+        ws_user_items = wb.create_sheet("Товары")
+        user_item_rows = await (await db.execute(
+            "SELECT ii.invoice_id, ii.product_name, ii.quantity, ii.unit_price, ii.line_total, "
+            "       i.deal_amount, i.reward_amount, i.created_at, i.handled_at, "
+            f"       {invoice_period_i} AS report_date "
+            "FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id "
+            f"WHERE i.tg_id = ? AND i.status='approved' AND {invoice_where_i} "
+            "ORDER BY report_date DESC, ii.invoice_id DESC, ii.id ASC",
+            (tg_id, start_iso, end_iso),
+        )).fetchall()
+        _write_table(
+            ws_user_items,
+            ["Накладная", "Товар", "Количество", "Цена продажи", "Сумма товара",
+             "Сумма накладной", "Вознаграждение", "Создано", "Дата решения", "Дата отчета"],
+            [[r["invoice_id"], r["product_name"], r["quantity"], r["unit_price"], r["line_total"],
+              r["deal_amount"], r["reward_amount"], r["created_at"], r["handled_at"], r["report_date"]]
+             for r in user_item_rows],
+        )
+
+        ws_user_product_summary = wb.create_sheet("Сводка товаров")
+        user_product_rows = await (await db.execute(
+            "SELECT MIN(ii.product_name) AS product_name, SUM(ii.quantity) AS quantity, "
+            "       MIN(ii.unit_price) AS min_price, MAX(ii.unit_price) AS max_price, "
+            "       CASE WHEN SUM(ii.quantity) > 0 "
+            "            THEN SUM(ii.line_total) / SUM(ii.quantity) ELSE 0 END AS avg_price, "
+            "       SUM(ii.line_total) AS total_sum "
+            "FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id "
+            f"WHERE i.tg_id = ? AND i.status='approved' AND {invoice_where_i} "
+            "GROUP BY COALESCE(NULLIF(ii.product_key, ''), LOWER(TRIM(ii.product_name))) ORDER BY total_sum DESC",
+            (tg_id, start_iso, end_iso),
+        )).fetchall()
+        _write_table(
+            ws_user_product_summary,
+            ["Товар", "Количество", "Мин. цена", "Макс. цена", "Средняя цена", "Общая сумма"],
+            [[r["product_name"], r["quantity"], r["min_price"], r["max_price"],
+              r["avg_price"], r["total_sum"]] for r in user_product_rows],
         )
 
         ws_po = wb.create_sheet("Выплаты")

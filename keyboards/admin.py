@@ -13,6 +13,7 @@ def admin_main_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🧾 Накладные"), KeyboardButton(text="💳 Счета")],
             [KeyboardButton(text="🏢 Поставщики"), KeyboardButton(text="📦 Excel-прайсы")],
             [KeyboardButton(text="📊 Аналитика"), KeyboardButton(text=BTN_ADMIN_USERS)],
+            [KeyboardButton(text="🎁 Акции и предложения"), KeyboardButton(text="✉️ Личные сообщения")],
             [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text=BTN_ADMIN_SURVEYS)],
             [KeyboardButton(text=BTN_ADMIN_CHATS), KeyboardButton(text="👥 Админы")],
         ],

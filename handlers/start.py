@@ -10,6 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from callbacks import AdminRegCb, UserRegCb
 from config import Settings
 from db import get_registration, get_user, is_admin, upsert_registration
+from db.personal_messages import update_user_telegram_profile
 from keyboards.admin import admin_main_kb
 from keyboards.user import (
     user_back_cancel_kb,
@@ -69,6 +70,13 @@ async def cmd_start(message: Message, state: FSMContext, settings: Settings) -> 
         return
 
     user = await get_user(settings.db_path, message.from_user.id)
+    if user:
+        await update_user_telegram_profile(
+            settings.db_path,
+            message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
 
     if user and user.get("status") == "approved":
         await message.answer("🏠 <b>Главное меню</b>", reply_markup=user_main_kb())
@@ -206,6 +214,8 @@ async def _submit_registration(
         phone=data["phone"],
         file_id=file_id,
         file_kind=file_kind,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
     )
     await state.clear()
 

@@ -10,6 +10,10 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _product_key(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
 async def create_invoice(
     db_path: str,
     tg_id: int,
@@ -53,6 +57,23 @@ async def get_invoice_full(db_path: str, invoice_id: int) -> dict[str, Any] | No
         )
         row = await cur.fetchone()
         return dict(row) if row else None
+
+
+async def list_invoice_items(db_path: str, invoice_id: int) -> list[dict[str, Any]]:
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                """
+                SELECT id, invoice_id, product_name, product_key, quantity, unit_price, line_total, created_at
+                FROM invoice_items
+                WHERE invoice_id = ?
+                ORDER BY id ASC
+                """,
+                (invoice_id,),
+            )
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 async def count_user_invoices_by_status(db_path: str, tg_id: int) -> dict[str, int]:
@@ -99,7 +120,9 @@ async def list_invoices_for_user(
             """
             SELECT
               i.*,
-              s.name AS supplier_name
+              s.name AS supplier_name,
+              (SELECT COALESCE(SUM(ii.quantity), 0) FROM invoice_items ii WHERE ii.invoice_id = i.id) AS items_qty,
+              (SELECT COUNT(1) FROM invoice_items ii WHERE ii.invoice_id = i.id) AS items_count
             FROM invoices i
             LEFT JOIN suppliers s ON s.id = i.supplier_id
             WHERE i.tg_id = ? AND i.status = ?
@@ -117,9 +140,32 @@ async def approve_invoice(
     invoice_id: int,
     deal_amount: float,
     reward_amount: float,
+    items: list[dict[str, Any]] | None = None,
 ) -> None:
     now = _utcnow()
     async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys = ON;")
+        await db.execute("DELETE FROM invoice_items WHERE invoice_id = ?", (invoice_id,))
+        for item in items or []:
+            quantity = float(item["quantity"])
+            unit_price = float(item["unit_price"])
+            line_total = round(quantity * unit_price, 2)
+            await db.execute(
+                """
+                INSERT INTO invoice_items (
+                    invoice_id, product_name, product_key, quantity, unit_price, line_total, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    invoice_id,
+                    str(item["product_name"]).strip(),
+                    _product_key(str(item["product_name"])),
+                    quantity,
+                    unit_price,
+                    line_total,
+                    now,
+                ),
+            )
         await db.execute(
             """
             UPDATE invoices
@@ -140,6 +186,7 @@ async def approve_invoice(
 async def reject_invoice(db_path: str, invoice_id: int, reason: str) -> None:
     now = _utcnow()
     async with aiosqlite.connect(db_path) as db:
+        await db.execute("DELETE FROM invoice_items WHERE invoice_id = ?", (invoice_id,))
         await db.execute(
             """
             UPDATE invoices
@@ -164,6 +211,7 @@ async def request_invoice_recheck(
 ) -> None:
     now = _utcnow()
     async with aiosqlite.connect(db_path) as db:
+        await db.execute("DELETE FROM invoice_items WHERE invoice_id = ?", (invoice_id,))
         await db.execute(
             """
             UPDATE invoices

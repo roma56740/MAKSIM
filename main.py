@@ -18,6 +18,7 @@ from handlers.user.profile import router as user_profile_router
 from handlers.user.invoices import router as user_invoices_router
 from handlers.user.bills import router as user_bills_router  # ✅ НОВОЕ
 from handlers.user.surveys import router as user_surveys_router
+from handlers.user.promotions import router as user_promotions_router
 
 # admin
 from handlers.admin.db_export import router as admin_db_export_router
@@ -33,12 +34,15 @@ from handlers.admin.products import router as admin_products_router
 from handlers.admin.registration import router as admin_reg_router
 from handlers.admin.bills import router as admin_bills_router  # ✅ НОВОЕ
 from handlers.admin.surveys import router as admin_surveys_router
+from handlers.admin.promotions import router as admin_promotions_router
+from handlers.admin.personal_messages import router as admin_personal_messages_router
 from handlers.user.ai_chat import router as user_ai_chat_router
 from handlers.admin.ai import router as admin_ai_router  # ✅ ИИ
 
 # new
 from handlers.user.admin_chat import router as user_admin_chat_router
 from handlers.admin.support_chats import router as admin_support_chats_router
+from services.promotions import promotion_expiry_worker
 
 async def main() -> None:
     settings = load_settings()
@@ -65,6 +69,7 @@ async def main() -> None:
     dp.include_router(user_bills_router)  # ✅ НОВОЕ
     dp.include_router(user_admin_chat_router)      # ✅ чат с админом
     dp.include_router(user_surveys_router)         # ✅ ответы на опросы
+    dp.include_router(user_promotions_router)
 
     # admin
     dp.include_router(admin_invoices_panel_router)
@@ -74,6 +79,8 @@ async def main() -> None:
     dp.include_router(admin_users_router)
     dp.include_router(admin_broadcast_router)
     dp.include_router(admin_surveys_router)  # ✅ опросы
+    dp.include_router(admin_promotions_router)
+    dp.include_router(admin_personal_messages_router)
     dp.include_router(admin_admins_router)
     dp.include_router(admin_suppliers_router)
     dp.include_router(admin_prices_router)
@@ -88,7 +95,15 @@ async def main() -> None:
     # start/регистрация
     dp.include_router(start_router)
 
-    await dp.start_polling(bot)
+    expiry_task = asyncio.create_task(
+        promotion_expiry_worker(bot, settings.db_path),
+        name="promotion-expiry-worker",
+    )
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        expiry_task.cancel()
+        await asyncio.gather(expiry_task, return_exceptions=True)
 
 
 if __name__ == "__main__":

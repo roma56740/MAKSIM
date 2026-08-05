@@ -250,6 +250,8 @@ def _summary_text(
     )
     lines.append(f"• Сумма продаж: <b>{_money(summary.get('deal_sum', 0))}</b> ₽")
     lines.append(f"• Вознаграждение: <b>{_money(summary.get('reward_sum', 0))}</b> ₽")
+    lines.append(f"• Товарных позиций: <b>{summary.get('item_lines', 0)}</b>")
+    lines.append(f"• Продано единиц товара: <b>{_money(summary.get('items_qty', 0))}</b>")
     lines.append("")
     lines.append("💸 <b>Выплаты</b>")
     lines.append(f"• Запросов за период: <b>{summary.get('payouts_total', 0)}</b>")
@@ -521,10 +523,13 @@ async def _build_users_page(
             deal_sum = _money(u.get("deal_sum", 0))
             kp_cnt = u.get("kp_items_cnt", 0)
             payouts_sum = _money(u.get("payout_sum", 0))
+            items_qty = _money(u.get("items_qty", 0))
+            item_lines = int(u.get("item_lines", 0) or 0)
 
             lines.append(
                 f"{idx}. <b>{name}</b> (<code>{tg_id}</code>)\n"
                 f"   🧾 накладных: <b>{inv_cnt}</b> | 💰 вознаграждение: <b>{reward_sum}</b> ₽\n"
+                f"   📦 товарных строк: <b>{item_lines}</b> | продано единиц: <b>{items_qty}</b>\n"
                 f"   🤝 продажи: <b>{deal_sum}</b> ₽ | 🧩 КП позиций: <b>{kp_cnt}</b> | 💸 выплат: <b>{payouts_sum}</b> ₽"
             )
 

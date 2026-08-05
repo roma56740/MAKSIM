@@ -36,6 +36,7 @@ async def get_bot_summary(db_path: str, start_iso: str, end_iso: str) -> Dict[st
     - approved/rejected считаются по дате решения администратора.
     """
     invoice_where = _invoice_period_condition("")
+    invoice_where_i = _invoice_period_condition("i")
 
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
@@ -82,6 +83,17 @@ async def get_bot_summary(db_path: str, start_iso: str, end_iso: str) -> Dict[st
         )).fetchone()
         deal_sum = _sum(sums["deal_sum"])
         reward_sum = _sum(sums["reward_sum"])
+
+        item_sums = await (await db.execute(
+            "SELECT "
+            "COALESCE(SUM(ii.quantity), 0) AS items_qty, "
+            "COALESCE(SUM(ii.line_total), 0) AS items_sales, "
+            "COUNT(ii.id) AS item_lines "
+            "FROM invoice_items ii "
+            "JOIN invoices i ON i.id = ii.invoice_id "
+            f"WHERE i.status = 'approved' AND {invoice_where_i}",
+            (start_iso, end_iso),
+        )).fetchone()
 
         payouts_total = (await (await db.execute(
             "SELECT COUNT(*) AS c FROM payouts WHERE created_at >= ? AND created_at < ?",
@@ -145,6 +157,9 @@ async def get_bot_summary(db_path: str, start_iso: str, end_iso: str) -> Dict[st
             "invoices_rejected": inv_counts.get("rejected", 0),
             "deal_sum": deal_sum,
             "reward_sum": reward_sum,
+            "items_qty": _sum(item_sums["items_qty"]),
+            "items_sales": _sum(item_sums["items_sales"]),
+            "item_lines": int(item_sums["item_lines"] or 0),
             "payouts_total": payouts_total,
             "payouts_pending": po_counts.get("pending", 0),
             "payouts_paid": po_counts.get("paid", 0),
@@ -217,6 +232,19 @@ async def list_user_stats(db_path: str, start_iso: str, end_iso: str, limit: int
             WHERE i.tg_id = u.tg_id
               AND {invoice_where}) AS reward_sum,
 
+        (SELECT COALESCE(SUM(ii.quantity), 0)
+            FROM invoice_items ii
+            JOIN invoices i ON i.id = ii.invoice_id
+            WHERE i.tg_id = u.tg_id
+              AND i.status = 'approved'
+              AND {invoice_where}) AS items_qty,
+        (SELECT COUNT(ii.id)
+            FROM invoice_items ii
+            JOIN invoices i ON i.id = ii.invoice_id
+            WHERE i.tg_id = u.tg_id
+              AND i.status = 'approved'
+              AND {invoice_where}) AS item_lines,
+
         (SELECT COUNT(*) FROM kp_items k
             WHERE k.tg_id = u.tg_id
               AND k.created_at >= ? AND k.created_at < ?) AS kp_items_cnt,
@@ -237,6 +265,8 @@ async def list_user_stats(db_path: str, start_iso: str, end_iso: str, limit: int
     LIMIT ? OFFSET ?
     """
     params = (
+        start_iso, end_iso,
+        start_iso, end_iso,
         start_iso, end_iso,
         start_iso, end_iso,
         start_iso, end_iso,

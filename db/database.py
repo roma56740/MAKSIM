@@ -32,6 +32,13 @@ async def init_db(db_path: str) -> None:
             );
             """
         )
+
+        cur = await db.execute("PRAGMA table_info(users)")
+        user_cols = [r[1] for r in await cur.fetchall()]
+        if "username" not in user_cols:
+            await db.execute("ALTER TABLE users ADD COLUMN username TEXT;")
+        if "first_name" not in user_cols:
+            await db.execute("ALTER TABLE users ADD COLUMN first_name TEXT;")
         # --------------------- BILLS (счета на оплату) ---------------------
         await db.execute(
             """
@@ -172,6 +179,98 @@ async def init_db(db_path: str) -> None:
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_handled_at ON invoices(handled_at);")
 
+        # --------------------- INVOICE ITEMS (товары из накладных) ---------------------
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS invoice_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                invoice_id INTEGER NOT NULL,
+                product_name TEXT NOT NULL,
+                product_key TEXT,
+                quantity REAL NOT NULL,
+                unit_price REAL NOT NULL,
+                line_total REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
+            );
+            """
+        )
+        cur = await db.execute("PRAGMA table_info(invoice_items)")
+        invoice_item_cols = [r[1] for r in await cur.fetchall()]
+        if "product_key" not in invoice_item_cols:
+            await db.execute("ALTER TABLE invoice_items ADD COLUMN product_key TEXT;")
+
+        # SQLite LOWER/NOCASE не приводит кириллицу к одному регистру.
+        # Нормализуем ключ Python-методом casefold, включая старые строки.
+        rows = await (await db.execute(
+            "SELECT id, product_name FROM invoice_items "
+            "WHERE product_key IS NULL OR TRIM(product_key) = ''"
+        )).fetchall()
+        for item_id, product_name in rows:
+            product_key = " ".join(str(product_name or "").split()).casefold()
+            await db.execute(
+                "UPDATE invoice_items SET product_key = ? WHERE id = ?",
+                (product_key, item_id),
+            )
+
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice_id ON invoice_items(invoice_id);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoice_items_product_name ON invoice_items(product_name);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoice_items_product_key ON invoice_items(product_key);")
+
+        # --------------------- PROMOTIONS / SPECIAL OFFERS ---------------------
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promotions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL DEFAULT 'promotion',
+                title TEXT NOT NULL,
+                text TEXT,
+                file_id TEXT,
+                file_kind TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                expires_at TEXT,
+                archived_at TEXT,
+                created_by INTEGER,
+                duplicated_from INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (duplicated_from) REFERENCES promotions(id) ON DELETE SET NULL
+            );
+            """
+        )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_promotions_status ON promotions(status);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_promotions_expires_at ON promotions(expires_at);")
+
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promotion_deliveries (
+                promotion_id INTEGER NOT NULL,
+                tg_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                deleted_at TEXT,
+                PRIMARY KEY (promotion_id, tg_id, message_id),
+                FOREIGN KEY (promotion_id) REFERENCES promotions(id) ON DELETE CASCADE
+            );
+            """
+        )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_promotion_deliveries_active ON promotion_deliveries(promotion_id, deleted_at);")
+
+        # --------------------- TELEGRAM BUSINESS CONNECTIONS ---------------------
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_business_connections (
+                connection_id TEXT PRIMARY KEY,
+                admin_tg_id INTEGER NOT NULL,
+                user_chat_id INTEGER,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                rights_json TEXT,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_business_connections_admin ON telegram_business_connections(admin_tg_id, is_enabled);")
+
         # --------------------- PAYOUTS (выплаты) ---------------------
         await db.execute(
             """
@@ -309,10 +408,11 @@ async def init_db(db_path: str) -> None:
         # --------------------- AI USER CHAT ---------------------
         await init_ai_user_chat_db(conn=db)
 
-        await create_support_chat_tables(db_path)
-
         await db.commit()
 
+    # Открываем отдельное соединение только после фиксации основной миграции,
+    # чтобы SQLite не блокировал базу при первом запуске/обновлении.
+    await create_support_chat_tables(db_path)
 
 
 async def is_admin(db_path: str, tg_id: int, env_admin_ids: set[int]) -> bool:
@@ -390,6 +490,8 @@ async def upsert_registration(
     phone: str,
     file_id: str | None,
     file_kind: str | None,
+    username: str | None = None,
+    first_name: str | None = None,
 ) -> None:
     now = _utcnow()
 
@@ -414,16 +516,21 @@ async def upsert_registration(
 
         await db.execute(
             """
-            INSERT INTO users (tg_id, full_name, phone, reg_type, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'pending', ?, ?)
+            INSERT INTO users (
+                tg_id, full_name, phone, reg_type, status,
+                username, first_name, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
             ON CONFLICT(tg_id) DO UPDATE SET
                 full_name = excluded.full_name,
                 phone = excluded.phone,
                 reg_type = excluded.reg_type,
                 status = 'pending',
+                username = excluded.username,
+                first_name = excluded.first_name,
                 updated_at = excluded.updated_at
             """,
-            (tg_id, full_name, phone, reg_type, now, now),
+            (tg_id, full_name, phone, reg_type, username, first_name, now, now),
         )
 
         await db.commit()
