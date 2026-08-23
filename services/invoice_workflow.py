@@ -18,7 +18,9 @@ from services.invoice_recognition import (
     detect_mime_type,
     normalize_mime_type,
     recognize_invoice,
+    SUPPORTED_SPREADSHEET_MIME_TYPES,
 )
+from services.invoice_excel import recognize_invoice_excel
 
 
 def money(value: Any) -> str:
@@ -146,6 +148,8 @@ async def download_invoice_file(bot: Bot, invoice: dict[str, Any]) -> InvoiceFil
             "image/jpeg": ".jpg",
             "image/png": ".png",
             "image/webp": ".webp",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+            "application/vnd.ms-excel": ".xls",
         }.get(mime_type, "")
         filename = f"invoice_{invoice.get('id')}{extension}"
 
@@ -160,7 +164,10 @@ async def analyze_invoice_from_telegram(bot: Bot, db_path: str, invoice_id: int)
     await mark_invoice_analysis_processing(db_path, invoice_id)
     try:
         invoice_file = await download_invoice_file(bot, invoice)
-        analysis = await recognize_invoice(invoice_file)
+        if invoice_file.mime_type in SUPPORTED_SPREADSHEET_MIME_TYPES:
+            analysis = recognize_invoice_excel(invoice_file)
+        else:
+            analysis = await recognize_invoice(invoice_file)
         await save_invoice_analysis(db_path, invoice_id, analysis)
         return analysis
     except InvoiceRecognitionError as exc:

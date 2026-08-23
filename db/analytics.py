@@ -283,3 +283,54 @@ async def list_user_stats(db_path: str, start_iso: str, end_iso: str, limit: int
         db.row_factory = aiosqlite.Row
         rows = await (await db.execute(q, params)).fetchall()
         return [dict(r) for r in rows]
+
+
+async def get_user_sales_summary(
+    db_path: str,
+    tg_id: int,
+    start_iso: str,
+    end_iso: str,
+) -> Dict[str, Any]:
+    """Персональная сводка менеджера за период [start_iso, end_iso)."""
+    invoice_where = _invoice_period_condition("i")
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        invoices = await (
+            await db.execute(
+                "SELECT COUNT(*) AS total, "
+                "SUM(CASE WHEN i.status='pending' THEN 1 ELSE 0 END) AS pending, "
+                "SUM(CASE WHEN i.status='approved' THEN 1 ELSE 0 END) AS approved, "
+                "SUM(CASE WHEN i.status='rejected' THEN 1 ELSE 0 END) AS rejected, "
+                "COALESCE(SUM(CASE WHEN i.status='approved' THEN COALESCE(i.deal_amount,0) ELSE 0 END),0) AS deal_sum, "
+                "COALESCE(SUM(CASE WHEN i.status='approved' THEN COALESCE(i.reward_amount,0) ELSE 0 END),0) AS reward_sum "
+                "FROM invoices i "
+                f"WHERE i.tg_id = ? AND {invoice_where}",
+                (tg_id, start_iso, end_iso),
+            )
+        ).fetchone()
+        items = await (
+            await db.execute(
+                "SELECT COUNT(ii.id) AS item_lines, "
+                "COALESCE(SUM(ii.quantity),0) AS items_qty, "
+                "COALESCE(SUM(ii.line_total),0) AS items_sum "
+                "FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id "
+                f"WHERE i.tg_id = ? AND i.status='approved' AND {invoice_where}",
+                (tg_id, start_iso, end_iso),
+            )
+        ).fetchone()
+        payouts = await (
+            await db.execute(
+                "SELECT COUNT(*) AS total, "
+                "COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) AS paid_sum, "
+                "COALESCE(SUM(CASE WHEN status='pending' THEN amount ELSE 0 END),0) AS pending_sum "
+                "FROM payouts WHERE tg_id = ? AND created_at >= ? AND created_at < ?",
+                (tg_id, start_iso, end_iso),
+            )
+        ).fetchone()
+        return {
+            **(dict(invoices) if invoices else {}),
+            **(dict(items) if items else {}),
+            "payouts_total": int(payouts["total"] or 0) if payouts else 0,
+            "paid_sum": float(payouts["paid_sum"] or 0) if payouts else 0.0,
+            "pending_payout_sum": float(payouts["pending_sum"] or 0) if payouts else 0.0,
+        }

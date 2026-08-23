@@ -13,7 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import Settings
-from db import is_admin, list_db_admin_ids
+from db import is_admin
 from db.promotions import (
     count_promotions,
     create_promotion,
@@ -24,7 +24,6 @@ from keyboards.admin import admin_back_cancel_kb, admin_main_kb
 from services.promotions import (
     archive_and_remove_promotion,
     promotion_caption,
-    publish_promotion,
 )
 
 router = Router()
@@ -151,20 +150,10 @@ async def _finish_creation(
     )
     await state.clear()
 
-    status = await message.answer("⏳ Публикую предложение менеджерам…")
-    excluded_ids = set(settings.admin_ids)
-    excluded_ids.update(await list_db_admin_ids(settings.db_path))
-    ok, fail = await publish_promotion(
-        message.bot,
-        settings.db_path,
-        promotion_id,
-        excluded_ids=excluded_ids,
-    )
-    await status.edit_text(
-        "✅ <b>Предложение опубликовано</b>\n\n"
-        f"Получили: <b>{ok}</b>\n"
-        f"Ошибки: <b>{fail}</b>\n\n"
-        "После окончания таймера оно исчезнет у менеджеров, но останется в архиве администратора."
+    await message.answer(
+        "✅ <b>Предложение сохранено</b>\n\n"
+        "Уведомления менеджерам не отправлялись. Предложение доступно только "
+        "в разделе «🎁 Акции» и будет храниться там до окончания срока."
     )
     await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_main_kb())
 
@@ -180,6 +169,7 @@ async def promotions_root(message: Message, state: FSMContext, settings: Setting
         "🎁 <b>Акции и спецпредложения</b>\n\n"
         f"Активных: <b>{active}</b>\n"
         f"В архиве: <b>{archived}</b>\n\n"
+        "Это накопительный раздел: новые материалы не отправляются менеджерам уведомлениями. "
         "Можно задать таймер или оставить предложение бессрочным.",
         reply_markup=_main_kb(),
     )

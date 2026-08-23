@@ -17,7 +17,15 @@ logger = logging.getLogger(__name__)
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_ITEMS = 150
 SUPPORTED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
-SUPPORTED_MIME_TYPES = {"application/pdf", *SUPPORTED_IMAGE_MIME_TYPES}
+SUPPORTED_SPREADSHEET_MIME_TYPES = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+}
+SUPPORTED_MIME_TYPES = {
+    "application/pdf",
+    *SUPPORTED_IMAGE_MIME_TYPES,
+    *SUPPORTED_SPREADSHEET_MIME_TYPES,
+}
 
 
 class InvoiceRecognitionError(RuntimeError):
@@ -69,6 +77,11 @@ def detect_mime_type(data: bytes) -> str:
 
 
 def normalize_mime_type(filename: str | None, mime_type: str | None) -> str:
+    filename_lower = (filename or "").casefold()
+    if filename_lower.endswith(".xlsx"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if filename_lower.endswith(".xls"):
+        return "application/vnd.ms-excel"
     value = (mime_type or "").split(";", 1)[0].strip().lower()
     if value == "image/jpg":
         value = "image/jpeg"
@@ -88,7 +101,7 @@ def validate_invoice_file(file: InvoiceFile) -> None:
     if len(file.data) > MAX_FILE_BYTES:
         raise InvoiceRecognitionError("Файл слишком большой. Максимальный размер — 20 МБ.")
     if file.mime_type not in SUPPORTED_MIME_TYPES:
-        raise InvoiceRecognitionError("Поддерживаются PDF, JPG, PNG и WEBP.")
+        raise InvoiceRecognitionError("Поддерживаются PDF, JPG, PNG, WEBP, XLSX и XLS.")
 
 
 INVOICE_SCHEMA: dict[str, Any] = {
@@ -281,6 +294,9 @@ def _clean_result(raw: dict[str, Any]) -> dict[str, Any]:
 
 async def recognize_invoice(file: InvoiceFile) -> dict[str, Any]:
     validate_invoice_file(file)
+
+    if file.mime_type in SUPPORTED_SPREADSHEET_MIME_TYPES:
+        raise InvoiceRecognitionError("Excel-файлы должны обрабатываться табличным распознавателем.")
 
     content: list[dict[str, Any]] = [{"type": "input_text", "text": PROMPT}]
     if file.mime_type == "application/pdf":

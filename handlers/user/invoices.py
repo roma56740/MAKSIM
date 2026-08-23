@@ -22,7 +22,11 @@ from db.invoices import (
     request_invoice_recheck,
 )
 from keyboards.user import user_back_cancel_kb, user_main_kb
-from services.invoice_recognition import InvoiceRecognitionError, normalize_mime_type
+from services.invoice_recognition import (
+    InvoiceRecognitionError,
+    SUPPORTED_MIME_TYPES,
+    normalize_mime_type,
+)
 from services.invoice_workflow import (
     analysis_header,
     analyze_invoice_from_telegram,
@@ -210,6 +214,7 @@ async def invoice_new_start(cbq: CallbackQuery, state: FSMContext) -> None:
 
     await cbq.message.answer(
         "📎 <b>Отправьте накладную</b> (фото или документ).\n\n"
+        "Поддерживаются PDF, JPG, PNG, WEBP, XLSX и XLS.\n"
         "После отправки она автоматически уйдёт админам на проверку ✅",
         reply_markup=user_back_cancel_kb(),
     )
@@ -227,9 +232,9 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
         file_kind = "document"
         source_file_name = message.document.file_name or f"invoice_{message.from_user.id}"
         source_mime_type = normalize_mime_type(source_file_name, message.document.mime_type)
-        if source_mime_type not in {"application/pdf", "image/jpeg", "image/png", "image/webp"}:
+        if source_mime_type not in SUPPORTED_MIME_TYPES:
             await message.answer(
-                "⚠️ Отправьте накладную в формате <b>PDF, JPG, PNG или WEBP</b>."
+                "⚠️ Отправьте накладную в формате <b>PDF, JPG, PNG, WEBP, XLSX или XLS</b>."
             )
             return
 
@@ -290,7 +295,7 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
 
 @router.message(NewInvoice.waiting_file, ~F.text.in_(["❌ Отмена", "⬅️ Назад"]))
 async def invoice_need_file(message: Message) -> None:
-    await message.answer("⚠️ Нужно отправить именно <b>фото</b> или <b>документ</b>.")
+    await message.answer("⚠️ Нужно отправить <b>фото, PDF или Excel-файл</b> с накладной.")
 
 
 @router.message(NewInvoice.waiting_file, F.text.in_(["❌ Отмена", "⬅️ Назад"]))

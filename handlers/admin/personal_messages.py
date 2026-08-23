@@ -18,6 +18,7 @@ from db.personal_messages import (
     count_approved_managers,
     get_active_business_connection,
     get_manager,
+    list_approved_manager_groups,
     list_approved_managers,
     save_business_connection,
 )
@@ -47,8 +48,20 @@ def _main_kb(has_connection: bool):
     kb = InlineKeyboardBuilder()
     if has_connection:
         kb.button(text="👤 Одному менеджеру", callback_data="pmsg:list:0")
+        kb.button(text="🧩 Группе менеджеров", callback_data="pmsg:groups")
         kb.button(text="👥 Всем менеджерам", callback_data="pmsg:all")
     kb.button(text="🔄 Проверить подключение", callback_data="pmsg:menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _groups_kb(items: list[dict[str, Any]]):
+    kb = InlineKeyboardBuilder()
+    for index, item in enumerate(items):
+        name = str(item.get("reg_type") or "Без группы")
+        count = int(item.get("managers_count") or 0)
+        kb.button(text=f"🧩 {name} · {count}", callback_data=f"pmsg:group:{index}")
+    kb.button(text="🏠 Назад", callback_data="pmsg:menu")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -68,9 +81,9 @@ def _managers_kb(items: list[dict[str, Any]], page: int, total_pages: int):
     return kb.as_markup()
 
 
-def _confirm_kb():
+def _confirm_kb(label: str):
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Отправить всем", callback_data="pmsg:send_all")
+    kb.button(text=f"✅ {label}", callback_data="pmsg:send_audience")
     kb.button(text="❌ Отмена", callback_data="pmsg:cancel")
     kb.adjust(1)
     return kb.as_markup()
@@ -194,6 +207,7 @@ async def personal_pick_manager(call: CallbackQuery, state: FSMContext, settings
     await state.clear()
     await state.set_state(PersonalMessageForm.waiting_text)
     await state.update_data(target_id=tg_id)
+    await state.update_data(target_mode="one", target_group="")
     await call.message.answer(
         f"✉️ Сообщение для <b>{html.escape(str(manager.get('full_name') or manager.get('first_name') or tg_id))}</b>\n\n"
         "Введите текст. Обращение по имени будет добавлено автоматически. "
@@ -209,10 +223,50 @@ async def personal_all_start(call: CallbackQuery, state: FSMContext, settings: S
         return
     await state.clear()
     await state.set_state(PersonalMessageForm.waiting_text)
-    await state.update_data(target_id=0)
+    await state.update_data(target_id=0, target_mode="all", target_group="")
     await call.message.answer(
         "👥 <b>Сообщение всем менеджерам</b>\n\n"
         "Введите общий текст. Для каждого менеджера бот автоматически подставит его имя. "
+        "Можно использовать <code>{name}</code> в нужном месте текста.",
+        reply_markup=admin_back_cancel_kb(),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "pmsg:groups")
+async def personal_groups_list(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
+    if not await _admin(call.from_user.id, settings):
+        return
+    excluded_ids = await _excluded_admin_ids(settings)
+    groups = await list_approved_manager_groups(settings.db_path, excluded_ids)
+    if not groups:
+        await call.answer("Группы менеджеров пока пусты", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(group_names=[str(item.get("reg_type") or "Без группы") for item in groups])
+    await call.message.answer(
+        "🧩 <b>Выберите группу менеджеров</b>:",
+        reply_markup=_groups_kb(groups),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("pmsg:group:"))
+async def personal_group_start(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
+    if not await _admin(call.from_user.id, settings):
+        return
+    data = await state.get_data()
+    groups = list(data.get("group_names") or [])
+    index = int(call.data.rsplit(":", 1)[-1])
+    if index < 0 or index >= len(groups):
+        await call.answer("Группа не найдена", show_alert=True)
+        return
+    group_name = str(groups[index])
+    await state.set_state(PersonalMessageForm.waiting_text)
+    await state.update_data(target_id=0, target_mode="group", target_group=group_name)
+    await call.message.answer(
+        f"🧩 <b>Сообщение группе «{html.escape(group_name)}»</b>\n\n"
+        "Введите текст. Для каждого менеджера бот автоматически подставит его имя. "
         "Можно использовать <code>{name}</code> в нужном месте текста.",
         reply_markup=admin_back_cancel_kb(),
     )
@@ -239,21 +293,26 @@ async def personal_text_input(message: Message, state: FSMContext, settings: Set
 
     data = await state.get_data()
     target_id = int(data.get("target_id") or 0)
+    target_mode = str(data.get("target_mode") or ("all" if target_id == 0 else "one"))
+    target_group = str(data.get("target_group") or "")
     await state.update_data(text=text, connection_id=connection["connection_id"])
 
     if target_id == 0:
         excluded_ids = await _excluded_admin_ids(settings)
-        total = await count_approved_managers(settings.db_path, excluded_ids)
+        reg_types = [target_group] if target_mode == "group" and target_group else None
+        total = await count_approved_managers(settings.db_path, excluded_ids, reg_types=reg_types)
         preview_manager = {"first_name": "Имя"}
         preview_text = _personalize(text, preview_manager)
         if len(preview_text) > 1200:
             preview_text = preview_text[:1197] + "…"
         preview = html.escape(preview_text)
         await state.set_state(PersonalMessageForm.confirm_all)
+        audience = f"группа «{html.escape(target_group)}»" if reg_types else "все менеджеры"
         await message.answer(
             f"👁 <b>Предпросмотр</b>\n\n<pre>{preview}</pre>\n\n"
-            f"Получателей: <b>{total}</b>. Подтвердите отправку от имени вашего Telegram Business-аккаунта.",
-            reply_markup=_confirm_kb(),
+            f"Получатели: <b>{audience}</b> · <b>{total}</b>. "
+            "Подтвердите отправку от имени вашего Telegram Business-аккаунта.",
+            reply_markup=_confirm_kb("Отправить группе" if reg_types else "Отправить всем"),
         )
         return
 
@@ -288,13 +347,15 @@ async def personal_text_input(message: Message, state: FSMContext, settings: Set
     await message.answer("✅ Сообщение отправлено от имени администратора.", reply_markup=admin_main_kb())
 
 
-@router.callback_query(F.data == "pmsg:send_all")
-async def personal_send_all(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
+@router.callback_query(F.data.in_({"pmsg:send_audience", "pmsg:send_all"}))
+async def personal_send_audience(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
     if not await _admin(call.from_user.id, settings):
         return
     data = await state.get_data()
     text = str(data.get("text") or "").strip()
     connection_id = str(data.get("connection_id") or "")
+    target_mode = str(data.get("target_mode") or "all")
+    target_group = str(data.get("target_group") or "")
     if not text or not connection_id:
         await state.clear()
         await call.answer("Данные отправки потеряны", show_alert=True)
@@ -306,10 +367,15 @@ async def personal_send_all(call: CallbackQuery, state: FSMContext, settings: Se
     ok = 0
     fail = 0
     excluded_ids = await _excluded_admin_ids(settings)
+    reg_types = [target_group] if target_mode == "group" and target_group else None
 
     while True:
         managers = await list_approved_managers(
-            settings.db_path, limit=100, offset=offset, excluded_ids=excluded_ids
+            settings.db_path,
+            limit=100,
+            offset=offset,
+            excluded_ids=excluded_ids,
+            reg_types=reg_types,
         )
         if not managers:
             break

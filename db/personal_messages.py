@@ -67,19 +67,31 @@ async def get_active_business_connection(
         return dict(row) if row else None
 
 
-def _manager_filter(excluded_ids: Iterable[int] | None) -> tuple[str, list[int]]:
+def _manager_filter(
+    excluded_ids: Iterable[int] | None,
+    reg_types: Iterable[str] | None = None,
+) -> tuple[str, list[Any]]:
     excluded = sorted({int(value) for value in (excluded_ids or [])})
-    if not excluded:
-        return "", []
-    placeholders = ",".join("?" for _ in excluded)
-    return f" AND tg_id NOT IN ({placeholders})", excluded
+    groups = sorted({str(value).strip() for value in (reg_types or []) if str(value).strip()})
+    clauses: list[str] = []
+    params: list[Any] = []
+    if excluded:
+        placeholders = ",".join("?" for _ in excluded)
+        clauses.append(f"tg_id NOT IN ({placeholders})")
+        params.extend(excluded)
+    if groups:
+        placeholders = ",".join("?" for _ in groups)
+        clauses.append(f"reg_type IN ({placeholders})")
+        params.extend(groups)
+    return (" AND " + " AND ".join(clauses) if clauses else ""), params
 
 
 async def count_approved_managers(
     db_path: str,
     excluded_ids: Iterable[int] | None = None,
+    reg_types: Iterable[str] | None = None,
 ) -> int:
-    extra_where, params = _manager_filter(excluded_ids)
+    extra_where, params = _manager_filter(excluded_ids, reg_types)
     async with aiosqlite.connect(db_path) as db:
         row = await (
             await db.execute(
@@ -96,8 +108,9 @@ async def list_approved_managers(
     limit: int,
     offset: int,
     excluded_ids: Iterable[int] | None = None,
+    reg_types: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
-    extra_where, params = _manager_filter(excluded_ids)
+    extra_where, params = _manager_filter(excluded_ids, reg_types)
     params.extend([int(limit), int(offset)])
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
@@ -109,6 +122,29 @@ async def list_approved_managers(
                 WHERE status = 'approved'{extra_where}
                 ORDER BY COALESCE(full_name, first_name, username, CAST(tg_id AS TEXT)) COLLATE NOCASE
                 LIMIT ? OFFSET ?
+                """,
+                tuple(params),
+            )
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+async def list_approved_manager_groups(
+    db_path: str,
+    excluded_ids: Iterable[int] | None = None,
+) -> list[dict[str, Any]]:
+    extra_where, params = _manager_filter(excluded_ids)
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                f"""
+                SELECT COALESCE(NULLIF(TRIM(reg_type), ''), 'Без группы') AS reg_type,
+                       COUNT(1) AS managers_count
+                FROM users
+                WHERE status = 'approved'{extra_where}
+                GROUP BY COALESCE(NULLIF(TRIM(reg_type), ''), 'Без группы')
+                ORDER BY reg_type COLLATE NOCASE
                 """,
                 tuple(params),
             )

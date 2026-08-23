@@ -19,6 +19,7 @@ from handlers.user.invoices import router as user_invoices_router
 from handlers.user.bills import router as user_bills_router  # ✅ НОВОЕ
 from handlers.user.surveys import router as user_surveys_router
 from handlers.user.promotions import router as user_promotions_router
+from handlers.user.sales_report import router as user_sales_report_router
 
 # admin
 from handlers.admin.db_export import router as admin_db_export_router
@@ -70,6 +71,7 @@ async def main() -> None:
     dp.include_router(user_admin_chat_router)      # ✅ чат с админом
     dp.include_router(user_surveys_router)         # ✅ ответы на опросы
     dp.include_router(user_promotions_router)
+    dp.include_router(user_sales_report_router)
 
     # admin
     dp.include_router(admin_invoices_panel_router)
@@ -119,4 +121,3 @@ if __name__ == "__main__":
     logging.getLogger("httpx").setLevel(logging.WARNING if level == logging.INFO else logging.INFO)
 
     asyncio.run(main())
-
