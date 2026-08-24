@@ -1,4 +1,5 @@
 import os
+import hashlib
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -9,6 +10,9 @@ class Settings:
     bot_token: str
     admin_ids: set[int]
     db_path: str
+    site_registrations_path: str
+    site_registration_hook_url: str
+    site_registration_secret: str
 
 
 def _parse_admin_ids(raw: str) -> set[int]:
@@ -39,4 +43,18 @@ def load_settings() -> "Settings":
     raw_db_path = os.getenv("DB_PATH", "db/bot.sqlite3").strip() or "db/bot.sqlite3"
     db_path = os.path.abspath(raw_db_path)
 
-    return Settings(bot_token=bot_token, admin_ids=admin_ids, db_path=db_path)
+    raw_registrations_path = os.getenv("SITE_REGISTRATIONS_PATH", "data/site_registrations.json").strip() or "data/site_registrations.json"
+    site_registrations_path = os.path.abspath(raw_registrations_path)
+    site_registration_hook_url = os.getenv("SITE_REGISTRATION_HOOK_URL", "").strip()
+    site_registration_secret = os.getenv("SITE_REGISTRATION_SECRET", "").strip()
+    if not site_registration_secret:
+        site_registration_secret = hashlib.sha256(f"site-registration|{bot_token}".encode("utf-8")).hexdigest()
+
+    return Settings(
+        bot_token=bot_token,
+        admin_ids=admin_ids,
+        db_path=db_path,
+        site_registrations_path=site_registrations_path,
+        site_registration_hook_url=site_registration_hook_url,
+        site_registration_secret=site_registration_secret,
+    )

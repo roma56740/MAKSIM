@@ -37,6 +37,7 @@ from handlers.admin.bills import router as admin_bills_router  # ✅ НОВОЕ
 from handlers.admin.surveys import router as admin_surveys_router
 from handlers.admin.promotions import router as admin_promotions_router
 from handlers.admin.personal_messages import router as admin_personal_messages_router
+from handlers.admin.site_registrations import router as admin_site_registrations_router
 from handlers.user.ai_chat import router as user_ai_chat_router
 from handlers.admin.ai import router as admin_ai_router  # ✅ ИИ
 
@@ -74,6 +75,7 @@ async def main() -> None:
     dp.include_router(user_sales_report_router)
 
     # admin
+    dp.include_router(admin_site_registrations_router)
     dp.include_router(admin_invoices_panel_router)
     dp.include_router(admin_invoices_router)
     dp.include_router(admin_bills_router)  # ✅ НОВОЕ

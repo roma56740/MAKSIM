@@ -10,12 +10,13 @@ def admin_main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="👤 Модерация регистрации"), KeyboardButton(text="🤖 ИИ")],
+            [KeyboardButton(text="🌐 Регистрации сайта"), KeyboardButton(text="✉️ Личные сообщения")],
             [KeyboardButton(text="🧾 Накладные"), KeyboardButton(text="💳 Счета")],
             [KeyboardButton(text="🏢 Поставщики"), KeyboardButton(text="📦 Excel-прайсы")],
             [KeyboardButton(text="📊 Аналитика"), KeyboardButton(text=BTN_ADMIN_USERS)],
-            [KeyboardButton(text="🎁 Акции и предложения"), KeyboardButton(text="✉️ Личные сообщения")],
-            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text=BTN_ADMIN_SURVEYS)],
-            [KeyboardButton(text=BTN_ADMIN_CHATS), KeyboardButton(text="👥 Админы")],
+            [KeyboardButton(text="🎁 Акции и предложения"), KeyboardButton(text="📢 Рассылка")],
+            [KeyboardButton(text=BTN_ADMIN_SURVEYS), KeyboardButton(text=BTN_ADMIN_CHATS)],
+            [KeyboardButton(text="👥 Админы")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Админ-меню",
