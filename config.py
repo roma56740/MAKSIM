@@ -13,6 +13,9 @@ class Settings:
     site_registrations_path: str
     site_registration_hook_url: str
     site_registration_secret: str
+    site_api_enabled: bool
+    site_api_host: str
+    site_api_port: int
 
 
 def _parse_admin_ids(raw: str) -> set[int]:
@@ -49,6 +52,15 @@ def load_settings() -> "Settings":
     site_registration_secret = os.getenv("SITE_REGISTRATION_SECRET", "").strip()
     if not site_registration_secret:
         site_registration_secret = hashlib.sha256(f"site-registration|{bot_token}".encode("utf-8")).hexdigest()
+    site_api_enabled = os.getenv("SITE_API_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    site_api_host = os.getenv("SITE_API_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    raw_site_api_port = os.getenv("PORT", os.getenv("SITE_API_PORT", "8080")).strip()
+    try:
+        site_api_port = int(raw_site_api_port)
+    except ValueError as exc:
+        raise RuntimeError("PORT или SITE_API_PORT должен быть числом") from exc
+    if not 1 <= site_api_port <= 65535:
+        raise RuntimeError("PORT или SITE_API_PORT указан неверно")
 
     return Settings(
         bot_token=bot_token,
@@ -57,4 +69,7 @@ def load_settings() -> "Settings":
         site_registrations_path=site_registrations_path,
         site_registration_hook_url=site_registration_hook_url,
         site_registration_secret=site_registration_secret,
+        site_api_enabled=site_api_enabled,
+        site_api_host=site_api_host,
+        site_api_port=site_api_port,
     )

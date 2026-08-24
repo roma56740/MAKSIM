@@ -7,7 +7,9 @@ from aiogram.client.default import DefaultBotProperties
 from config import load_settings
 from db import init_db
 from db.surveys import init_surveys_db
+from db.site_registrations import init_site_registrations_db
 from services.image_store import ensure_default_image
+from services.site_registration_api import start_site_registration_api
 
 # user
 from handlers.user.pending_block import router as pending_router
@@ -52,6 +54,7 @@ async def main() -> None:
 
     await init_db(settings.db_path)
     await init_surveys_db(settings.db_path)
+    await init_site_registrations_db(settings.db_path)
     ensure_default_image()
 
     bot = Bot(
@@ -103,11 +106,14 @@ async def main() -> None:
         promotion_expiry_worker(bot, settings.db_path),
         name="promotion-expiry-worker",
     )
+    api_runner = await start_site_registration_api(bot, settings)
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         expiry_task.cancel()
         await asyncio.gather(expiry_task, return_exceptions=True)
+        if api_runner is not None:
+            await api_runner.cleanup()
 
 
 if __name__ == "__main__":
