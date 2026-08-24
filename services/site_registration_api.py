@@ -62,6 +62,7 @@ async def _notify_admins(bot: Bot, settings: Settings, registration: dict[str, A
     lines.append(f"<b>Телефон:</b> {html.escape(str(registration['phone']))}")
     if registration.get("email"):
         lines.append(f"<b>Email:</b> {html.escape(str(registration['email']))}")
+    lines.append(f"<b>Telegram ID:</b> <code>{html.escape(str(registration['telegram_id']))}</code>")
     lines.append(
         f"<b>Связаться через:</b> {html.escape(methods.get(str(registration['contact_method']), 'Не указано'))}"
     )
@@ -106,6 +107,7 @@ async def create_registration(request: web.Request) -> web.Response:
     full_name = _clean(payload.get("full_name"), 140)
     phone = _clean(payload.get("phone"), 80)
     email = _clean(payload.get("email"), 160)
+    telegram_id_raw = _clean(payload.get("telegram_id"), 24)
     company = _clean(payload.get("company"), 180)
     client_type = _clean(payload.get("client_type"), 20)
     contact_method = _clean(payload.get("contact_method"), 20)
@@ -113,6 +115,9 @@ async def create_registration(request: web.Request) -> web.Response:
         return web.json_response({"success": False, "message": "Заполните имя и телефон"}, status=422)
     if email and ("@" not in email or "." not in email.rsplit("@", 1)[-1]):
         return web.json_response({"success": False, "message": "Проверьте электронную почту"}, status=422)
+    if not telegram_id_raw.isdigit() or not 5 <= len(telegram_id_raw) <= 20:
+        return web.json_response({"success": False, "message": "Укажите числовой Telegram ID"}, status=422)
+    telegram_id = int(telegram_id_raw)
     if client_type not in {"private", "corporate"}:
         return web.json_response({"success": False, "message": "Выберите формат"}, status=422)
     if client_type == "corporate" and not company:
@@ -130,6 +135,7 @@ async def create_registration(request: web.Request) -> web.Response:
             full_name=full_name,
             phone=phone,
             email=email,
+            telegram_id=telegram_id,
             client_type=client_type,
             company=company,
             contact_method=contact_method,

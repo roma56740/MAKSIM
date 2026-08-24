@@ -65,7 +65,11 @@ async def main() -> None:
     dp = Dispatcher()
     dp["settings"] = settings
 
-    # user (важно: pending первым)
+    # Подтверждение регистрации сайта должно обрабатываться даже для новых
+    # пользователей, которые ещё не получили обычный доступ к боту.
+    dp.include_router(admin_site_registrations_router)
+
+    # user (важно: pending первым среди обычных разделов)
     dp.include_router(pending_router)
     dp.include_router(user_catalog_router)
     dp.include_router(kp_build_router)
@@ -78,7 +82,6 @@ async def main() -> None:
     dp.include_router(user_sales_report_router)
 
     # admin
-    dp.include_router(admin_site_registrations_router)
     dp.include_router(admin_invoices_panel_router)
     dp.include_router(admin_invoices_router)
     dp.include_router(admin_bills_router)  # ✅ НОВОЕ

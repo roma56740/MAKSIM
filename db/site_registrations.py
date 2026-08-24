@@ -22,6 +22,7 @@ async def init_site_registrations_db(db_path: str) -> None:
                 full_name TEXT NOT NULL,
                 phone TEXT NOT NULL,
                 email TEXT,
+                telegram_id INTEGER,
                 client_type TEXT NOT NULL,
                 company TEXT,
                 contact_method TEXT NOT NULL,
@@ -33,6 +34,10 @@ async def init_site_registrations_db(db_path: str) -> None:
             )
             """
         )
+        columns_cursor = await db.execute("PRAGMA table_info(site_registrations)")
+        columns = {str(row[1]) for row in await columns_cursor.fetchall()}
+        if "telegram_id" not in columns:
+            await db.execute("ALTER TABLE site_registrations ADD COLUMN telegram_id INTEGER")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_site_registrations_status ON site_registrations(status)"
         )
@@ -50,6 +55,7 @@ async def create_site_registration(
     full_name: str,
     phone: str,
     email: str,
+    telegram_id: int,
     client_type: str,
     company: str,
     contact_method: str,
@@ -60,9 +66,9 @@ async def create_site_registration(
         await db.execute(
             """
             INSERT INTO site_registrations (
-                id, access_token_hash, full_name, phone, email, client_type,
-                company, contact_method, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                id, access_token_hash, full_name, phone, email, telegram_id,
+                client_type, company, contact_method, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
             (
                 registration_id,
@@ -70,6 +76,7 @@ async def create_site_registration(
                 full_name,
                 phone,
                 email,
+                telegram_id,
                 client_type,
                 company,
                 contact_method,
@@ -89,7 +96,7 @@ async def get_site_registration(db_path: str, registration_id: str) -> dict[str,
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT id, full_name, phone, email, client_type, company,
+            SELECT id, full_name, phone, email, telegram_id, client_type, company,
                    contact_method, status, moderator_tg_id,
                    created_at, updated_at, moderated_at
             FROM site_registrations
@@ -133,7 +140,7 @@ async def set_site_registration_status(
     status: str,
     moderator_tg_id: int,
 ) -> dict[str, Any] | None:
-    if status not in {"approved", "rejected"}:
+    if status not in {"pending", "awaiting_user", "approved", "rejected"}:
         raise ValueError("Unsupported registration status")
     now = _utcnow()
     async with aiosqlite.connect(db_path) as db:
@@ -157,7 +164,7 @@ async def list_site_registrations(db_path: str, limit: int = 10000) -> list[dict
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT id, full_name, phone, email, client_type, company,
+            SELECT id, full_name, phone, email, telegram_id, client_type, company,
                    contact_method, status, moderator_tg_id,
                    created_at, updated_at, moderated_at
             FROM site_registrations

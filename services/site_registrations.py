@@ -21,6 +21,7 @@ def registration_from_message(text: str) -> dict[str, str]:
         "Компания": "company",
         "Телефон": "phone",
         "Email": "email",
+        "Telegram ID": "telegram_id",
         "Связаться через": "contact_label",
         "Дата": "date_label",
     }
@@ -70,6 +71,7 @@ async def save_registration_decision(
                 "full_name": source.get("full_name", ""),
                 "phone": source.get("phone", ""),
                 "email": source.get("email", ""),
+                "telegram_id": source.get("telegram_id", ""),
                 "company": source.get("company", ""),
                 "client_type": source.get("client_type", "private"),
                 "contact_label": source.get("contact_label", ""),
