@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import math
 from typing import Any
 
 import aiosqlite
@@ -215,7 +216,17 @@ async def approve_invoice(
         for item in items or []:
             quantity = float(item["quantity"])
             unit_price = float(item["unit_price"])
-            line_total = round(quantity * unit_price, 2)
+            try:
+                line_total = round(float(item.get("line_total")), 2)
+            except (TypeError, ValueError):
+                line_total = round(quantity * unit_price, 2)
+            if (
+                not all(math.isfinite(value) for value in (quantity, unit_price, line_total))
+                or quantity <= 0
+                or unit_price < 0
+                or line_total < 0
+            ):
+                continue
             await db.execute(
                 """
                 INSERT INTO invoice_items (

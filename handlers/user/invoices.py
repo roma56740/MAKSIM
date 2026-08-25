@@ -215,6 +215,7 @@ async def invoice_new_start(cbq: CallbackQuery, state: FSMContext) -> None:
     await cbq.message.answer(
         "📎 <b>Отправьте накладную</b> (фото или документ).\n\n"
         "Поддерживаются PDF, JPG, PNG, WEBP, XLSX и XLS.\n"
+        "Для точного чтения мелкого текста лучше отправить фото как файл без сжатия.\n"
         "После отправки она автоматически уйдёт админам на проверку ✅",
         reply_markup=user_back_cancel_kb(),
     )
@@ -248,9 +249,13 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
     )
     await state.clear()
 
+    # Старая надёжная схема сохранена: администратор получает файл сразу и не
+    # ждёт ответа внешнего сервиса распознавания.
+    await _notify_admins_new_invoice(message, settings, invoice_id)
+
     progress = await message.answer(
         "🔎 <b>Анализирую накладную…</b>\n\n"
-        "Распознаю номер, дату, товары, количество, цены и итоговую сумму. "
+        "Проверяю номер, дату, все товары, скидки и итог к оплате. "
         "Для большой накладной это может занять до минуты."
     )
 
@@ -289,8 +294,6 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
                 "Файл сохранён и отправлен администратору.",
                 reply_markup=user_main_kb(),
             )
-
-    await _notify_admins_new_invoice(message, settings, invoice_id)
 
 
 @router.message(NewInvoice.waiting_file, ~F.text.in_(["❌ Отмена", "⬅️ Назад"]))

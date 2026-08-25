@@ -24,6 +24,7 @@ from services.invoice_recognition import InvoiceRecognitionError
 from services.invoice_workflow import (
     analysis_header,
     analyze_invoice_from_telegram,
+    deal_amount_from_analysis,
     edit_template,
     money,
     split_item_messages,
@@ -203,6 +204,11 @@ async def admin_invoice_approve(cbq: CallbackQuery, state: FSMContext, settings:
     if str(inv.get("analysis_status") or "") == "completed" and analysis and analysis.get("items"):
         await _show_review(cbq.message, invoice_id, analysis)
         return
+    if str(inv.get("analysis_status") or "") == "processing":
+        await cbq.message.answer(
+            "🔎 Накладная уже распознаётся. Подождите немного и нажмите «Проверить» ещё раз."
+        )
+        return
     await _recognize_and_show(cbq.message, settings, invoice_id)
 
 
@@ -234,7 +240,7 @@ async def admin_invoice_confirm(cbq: CallbackQuery, state: FSMContext, settings:
         await cbq.answer("Сначала распознайте позиции", show_alert=True)
         return
 
-    deal_amount = round(sum(float(item["quantity"]) * float(item["unit_price"]) for item in items), 2)
+    deal_amount = deal_amount_from_analysis(analysis or {})
     total_qty = sum(float(item["quantity"]) for item in items)
 
     await cbq.answer()

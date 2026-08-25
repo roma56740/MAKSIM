@@ -7,7 +7,11 @@ from typing import Any, Iterable
 
 from openpyxl import load_workbook
 
-from services.invoice_recognition import InvoiceFile, InvoiceRecognitionError
+from services.invoice_recognition import (
+    InvoiceFile,
+    InvoiceRecognitionError,
+    normalize_invoice_result,
+)
 
 try:
     import xlrd
@@ -20,18 +24,53 @@ HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "name": ("наименование", "название", "товар", "номенклатура", "позиция"),
     "quantity": ("количество", "кол-во", "кол во", "qty", "шт"),
     "unit": ("единица", "ед изм", "ед. изм.", "ед"),
-    "unit_price": ("цена", "цена продажи", "цена за единицу", "стоимость ед"),
-    "line_total": ("сумма", "стоимость", "всего", "сумма строки"),
+    "unit_price_before_discount": (
+        "цена до скидки",
+        "базовая цена",
+        "первоначальная цена",
+        "розничная цена",
+    ),
+    "discount_percent": ("скидка %", "% скидки", "процент скидки"),
+    "discount_amount": ("сумма скидки", "скидка руб"),
+    "unit_price": (
+        "цена со скидкой",
+        "цена после скидки",
+        "цена продажи",
+        "цена за единицу",
+        "стоимость ед",
+        "цена",
+    ),
+    "line_total": (
+        "сумма со скидкой",
+        "сумма после скидки",
+        "итог строки",
+        "сумма строки",
+        "сумма",
+        "стоимость",
+        "всего",
+    ),
 }
 
 FINAL_TOTAL_MARKERS = (
     "итого к оплате",
     "всего к оплате",
+    "сумма к оплате",
+    "к оплате",
     "итого со скидкой",
+    "всего со скидкой",
     "сумма с учетом скидки",
     "сумма с учётом скидки",
     "итоговая сумма",
     "итого",
+)
+
+INTERMEDIATE_TOTAL_MARKERS = (
+    "без скидки",
+    "до скидки",
+    "сумма скидки",
+    "размер скидки",
+    "подытог",
+    "ндс",
 )
 
 
@@ -55,11 +94,36 @@ def _number(value: Any) -> float | None:
     if value is None or value == "":
         return None
     if isinstance(value, (int, float)):
-        return float(value)
-    text = _text(value).replace("\xa0", "").replace(" ", "").replace(",", ".")
-    text = re.sub(r"[^0-9.\-]", "", text)
+        result = float(value)
+        return result if result == result and result not in {float("inf"), float("-inf")} else None
+
+    text = _text(value).replace("\xa0", "").replace(" ", "")
+    text = re.sub(r"[^0-9,.\-]", "", text)
+    if not text or text in {"-", ".", ","}:
+        return None
+
+    # Поддержка 1 234,56; 1.234,56; 1,234.56 и обычных целых значений.
+    comma = text.rfind(",")
+    dot = text.rfind(".")
+    if comma >= 0 and dot >= 0:
+        decimal = "," if comma > dot else "."
+        thousands = "." if decimal == "," else ","
+        text = text.replace(thousands, "").replace(decimal, ".")
+    elif comma >= 0:
+        parts = text.split(",")
+        if len(parts) == 2 and 1 <= len(parts[1]) <= 4:
+            text = parts[0] + "." + parts[1]
+        else:
+            text = "".join(parts)
+    elif dot >= 0 and text.count(".") > 1:
+        parts = text.split(".")
+        if 1 <= len(parts[-1]) <= 4:
+            text = "".join(parts[:-1]) + "." + parts[-1]
+        else:
+            text = "".join(parts)
     try:
-        return float(text)
+        result = float(text)
+        return result if result == result and result not in {float("inf"), float("-inf")} else None
     except (TypeError, ValueError):
         return None
 
@@ -143,10 +207,13 @@ def _find_document_meta(rows: list[list[Any]], header_index: int) -> dict[str, s
 
 
 def _find_printed_total(rows: Iterable[list[Any]]) -> float | None:
-    candidates: list[tuple[int, float]] = []
-    for row in rows:
+    candidates: list[tuple[int, int, float]] = []
+    for row_index, row in enumerate(rows):
         label = " ".join(_normalized(cell) for cell in row if _text(cell))
         if not label:
+            continue
+        has_strong_final_marker = any(marker in label for marker in FINAL_TOTAL_MARKERS[:-1])
+        if not has_strong_final_marker and any(marker in label for marker in INTERMEDIATE_TOTAL_MARKERS):
             continue
         priority = next((len(FINAL_TOTAL_MARKERS) - index for index, marker in enumerate(FINAL_TOTAL_MARKERS) if marker in label), 0)
         if not priority:
@@ -154,11 +221,11 @@ def _find_printed_total(rows: Iterable[list[Any]]) -> float | None:
         numbers = [_number(cell) for cell in row]
         valid = [value for value in numbers if value is not None and value >= 0]
         if valid:
-            candidates.append((priority, valid[-1]))
+            candidates.append((priority, row_index, valid[-1]))
     if not candidates:
         return None
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return round(candidates[0][1], 2)
+    return round(candidates[0][2], 2)
 
 
 def recognize_invoice_excel(file: InvoiceFile) -> dict[str, Any]:
@@ -184,9 +251,22 @@ def recognize_invoice_excel(file: InvoiceFile) -> dict[str, Any]:
             continue
 
         quantity = _number(_cell(row, columns, "quantity"))
+        before_price = _number(_cell(row, columns, "unit_price_before_discount"))
+        discount_percent = _number(_cell(row, columns, "discount_percent"))
+        discount_amount = _number(_cell(row, columns, "discount_amount"))
         unit_price = _number(_cell(row, columns, "unit_price"))
         line_total = _number(_cell(row, columns, "line_total"))
-        quantity = quantity if quantity is not None and quantity > 0 else 1.0
+        if quantity is None or quantity <= 0:
+            quantity = 1.0
+            warnings.append(f"Строка {row_index}: количество не указано, принято значение 1.")
+
+        if unit_price is None and before_price is not None:
+            if discount_percent is not None and 0 <= discount_percent < 100:
+                unit_price = before_price * (1 - discount_percent / 100)
+            elif discount_amount is not None:
+                unit_price = (before_price * quantity - discount_amount) / quantity
+            else:
+                unit_price = before_price
 
         if unit_price is None and line_total is not None:
             unit_price = line_total / quantity
@@ -196,8 +276,9 @@ def recognize_invoice_excel(file: InvoiceFile) -> dict[str, Any]:
             continue
 
         expected = round(quantity * unit_price, 2)
-        if abs(line_total - expected) > max(1.0, abs(line_total) * 0.01):
-            # В Excel сумма строки приоритетнее: в ней уже может быть скидка.
+        if abs(line_total - expected) > max(0.02, abs(line_total) * 0.0005):
+            if before_price is None and unit_price > line_total / quantity:
+                before_price = unit_price
             unit_price = line_total / quantity
             warnings.append(f"Строка {row_index}: цена рассчитана из итоговой суммы строки с учётом возможной скидки.")
 
@@ -207,6 +288,9 @@ def recognize_invoice_excel(file: InvoiceFile) -> dict[str, Any]:
                 "product_name": name[:500],
                 "quantity": round(quantity, 4),
                 "unit": _text(_cell(row, columns, "unit")) or "шт",
+                "unit_price_before_discount": None if before_price is None else round(before_price, 2),
+                "discount_percent": discount_percent,
+                "discount_amount": discount_amount,
                 "unit_price": round(unit_price, 2),
                 "line_total": round(line_total, 2),
             }
@@ -220,25 +304,8 @@ def recognize_invoice_excel(file: InvoiceFile) -> dict[str, Any]:
 
     calculated_total = round(sum(float(item["line_total"]) for item in items), 2)
     printed_total = _find_printed_total(rows[header_index + 1 :])
-    if printed_total is not None and abs(printed_total - calculated_total) > max(2.0, printed_total * 0.01):
-        # Если итог меньше суммы строк, внизу документа, как правило, применена
-        # общая скидка. Пропорционально распределяем её по товарам, чтобы продажи
-        # и товарная аналитика сходились с фактической суммой к оплате.
-        if 0 < printed_total < calculated_total and printed_total / calculated_total >= 0.5:
-            factor = printed_total / calculated_total
-            distributed = 0.0
-            for item in items[:-1]:
-                item["line_total"] = round(float(item["line_total"]) * factor, 2)
-                item["unit_price"] = round(float(item["line_total"]) / float(item["quantity"]), 2)
-                distributed += float(item["line_total"])
-            items[-1]["line_total"] = round(printed_total - distributed, 2)
-            items[-1]["unit_price"] = round(float(items[-1]["line_total"]) / float(items[-1]["quantity"]), 2)
-            calculated_total = round(sum(float(item["line_total"]) for item in items), 2)
-            warnings.append("Общая скидка из итога документа пропорционально распределена по товарным позициям.")
-        else:
-            warnings.append("Итог в документе отличается от суммы распознанных строк. Администратору нужно проверить скидку и состав накладной.")
 
-    return {
+    raw_result = {
         "document_type": "Накладная / счёт (Excel)",
         "invoice_number": meta["invoice_number"],
         "invoice_date": meta["invoice_date"],
@@ -246,11 +313,17 @@ def recognize_invoice_excel(file: InvoiceFile) -> dict[str, Any]:
         "buyer": None,
         "responsible_manager": None,
         "currency": "RUB",
+        "subtotal_before_discount": calculated_total,
+        "discount_amount": None,
+        "amount_payable": printed_total,
         "total_amount": printed_total if printed_total is not None else calculated_total,
-        "calculated_total": calculated_total,
         "vat_amount": None,
-        "confidence": 0.98,
+        "confidence": 0.97 if not warnings else 0.9,
         "warnings": list(dict.fromkeys(warnings))[:20],
         "items": items,
-        "recognized_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    result = normalize_invoice_result(raw_result)
+    result["recognition_model"] = "excel"
+    result["verification_performed"] = True
+    result["recognized_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return result

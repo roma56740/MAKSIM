@@ -46,6 +46,26 @@ def confidence(value: Any) -> str:
         return "—"
 
 
+def _number_or_none(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result == result and result not in {float("inf"), float("-inf")} else None
+
+
+def deal_amount_from_analysis(analysis: dict[str, Any]) -> float:
+    """Финальная сумма продажи: прежде всего итог к оплате после скидок."""
+    for key in ("amount_payable", "total_amount", "calculated_total"):
+        value = _number_or_none(analysis.get(key))
+        if value is not None and value >= 0:
+            return round(value, 2)
+    return round(
+        sum(float(item.get("line_total") or 0) for item in analysis.get("items") or []),
+        2,
+    )
+
+
 def analysis_header(analysis: dict[str, Any], *, invoice_id: int | None = None) -> str:
     prefix = f"🧾 <b>Накладная #{invoice_id}</b>\n" if invoice_id is not None else "🧾 <b>Результат распознавания</b>\n"
     items = list(analysis.get("items") or [])
@@ -56,12 +76,26 @@ def analysis_header(analysis: dict[str, Any], *, invoice_id: int | None = None) 
         f"📅 Дата: <b>{html.escape(str(analysis.get('invoice_date') or '—'))}</b>",
         f"🏢 Поставщик: <b>{html.escape(str(analysis.get('supplier') or '—'))}</b>",
         f"📦 Позиций: <b>{len(items)}</b>",
-        f"💰 Итог по позициям: <b>{money(analysis.get('calculated_total'))}</b> {html.escape(str(analysis.get('currency') or 'RUB'))}",
         f"🎯 Точность распознавания: <b>{confidence(analysis.get('confidence'))}</b>",
     ]
-    printed_total = analysis.get("total_amount")
-    if printed_total is not None:
-        lines.insert(-1, f"🧮 Итог в документе: <b>{money(printed_total)}</b> {html.escape(str(analysis.get('currency') or 'RUB'))}")
+    currency = html.escape(str(analysis.get("currency") or "RUB"))
+    subtotal = analysis.get("subtotal_before_discount")
+    discount = analysis.get("discount_amount")
+    payable = analysis.get("amount_payable")
+    if payable is None:
+        payable = analysis.get("total_amount")
+    discount_value = _number_or_none(discount)
+    if subtotal is not None and discount_value is not None and discount_value > 0:
+        lines.insert(-1, f"🏷 До скидки: <b>{money(subtotal)}</b> {currency}")
+        lines.insert(-1, f"🎁 Скидка: <b>{money(discount)}</b> {currency}")
+    lines.insert(-1, f"💰 К оплате: <b>{money(payable)}</b> {currency}")
+    calculated_total = analysis.get("calculated_total")
+    if payable is not None and calculated_total is not None:
+        try:
+            if abs(float(payable) - float(calculated_total)) > max(2.0, abs(float(payable)) * 0.001):
+                lines.insert(-1, f"📋 Сумма распознанных товаров: <b>{money(calculated_total)}</b> {currency}")
+        except (TypeError, ValueError):
+            pass
     warnings = list(analysis.get("warnings") or [])
     if warnings:
         lines.append("\n⚠️ <b>Нужно проверить:</b>")
@@ -79,9 +113,19 @@ def item_lines(analysis: dict[str, Any]) -> list[str]:
         article = item.get("article")
         article_text = f" · арт. {html.escape(str(article))}" if article else ""
         unit = html.escape(str(item.get("unit") or "шт"))
+        before_price = item.get("unit_price_before_discount")
+        discount = item.get("discount_amount")
+        discount_text = ""
+        try:
+            if before_price is not None and float(before_price) > float(item.get("unit_price") or 0):
+                discount_text = f" (до скидки {money(before_price)})"
+            elif discount is not None and float(discount) > 0:
+                discount_text = f" (скидка {money(discount)})"
+        except (TypeError, ValueError):
+            pass
         result.append(
             f"<b>{index}.</b> {name}{article_text}\n"
-            f"   {quantity(item.get('quantity'))} {unit} × {money(item.get('unit_price'))} = "
+            f"   {quantity(item.get('quantity'))} {unit} × {money(item.get('unit_price'))}{discount_text} = "
             f"<b>{money(item.get('line_total'))}</b>"
         )
     return result
