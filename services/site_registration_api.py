@@ -12,7 +12,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import Settings
-from db import list_db_admin_ids
+from db import get_user, list_db_admin_ids
 from db.site_registrations import (
     create_site_registration,
     get_site_registration_by_token,
@@ -67,10 +67,13 @@ async def _notify_admins(bot: Bot, settings: Settings, registration: dict[str, A
     lines.append(f"<b>Телефон:</b> {html.escape(str(registration['phone']))}")
     if registration.get("email"):
         lines.append(f"<b>Email:</b> {html.escape(str(registration['email']))}")
-    lines.append(f"<b>Telegram ID:</b> <code>{html.escape(str(registration['telegram_id']))}</code>")
+    if registration.get("telegram_id"):
+        lines.append(f"<b>Telegram ID:</b> <code>{html.escape(str(registration['telegram_id']))}</code>")
     lines.append(
         f"<b>Связаться через:</b> {html.escape(methods.get(str(registration['contact_method']), 'Не указано'))}"
     )
+    if registration.get("contact_value"):
+        lines.append(f"<b>Контакт:</b> {html.escape(str(registration['contact_value']))}")
     markup = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
             text="✅ Открыть доступ",
@@ -117,21 +120,56 @@ async def create_registration(request: web.Request) -> web.Response:
     site_role = "manager" if _clean(payload.get("site_role"), 20) == "manager" else "client"
     client_type = _clean(payload.get("client_type"), 20)
     contact_method = _clean(payload.get("contact_method"), 20)
+    contact_value = _clean(payload.get("contact_value"), 160)
     if len(full_name) < 2 or len(phone) < 7:
         return web.json_response({"success": False, "message": "Заполните имя и телефон"}, status=422)
     if email and ("@" not in email or "." not in email.rsplit("@", 1)[-1]):
         return web.json_response({"success": False, "message": "Проверьте электронную почту"}, status=422)
-    if not telegram_id_raw.isdigit() or not 5 <= len(telegram_id_raw) <= 20:
-        return web.json_response({"success": False, "message": "Укажите числовой Telegram ID"}, status=422)
-    telegram_id = int(telegram_id_raw)
     if site_role == "manager":
+        if not telegram_id_raw.isdigit() or not 5 <= len(telegram_id_raw) <= 20:
+            return web.json_response(
+                {"success": False, "message": "Для менеджера укажите числовой Telegram ID"},
+                status=422,
+            )
+        telegram_id: int | None = int(telegram_id_raw)
         client_type = "manager"
-    elif client_type not in {"private", "corporate"}:
-        return web.json_response({"success": False, "message": "Выберите формат"}, status=422)
+        user = await get_user(settings.db_path, telegram_id)
+        db_admin_ids = set(await list_db_admin_ids(settings.db_path))
+        is_approved_employee = bool(user and user.get("status") == "approved")
+        is_bot_admin = telegram_id in settings.admin_ids or telegram_id in db_admin_ids
+        if not is_approved_employee and not is_bot_admin:
+            return web.json_response(
+                {
+                    "success": False,
+                    "message": (
+                        "Служебная регистрация доступна только действующим менеджерам, "
+                        "уже допущенным в Telegram-бот"
+                    ),
+                },
+                status=403,
+            )
+    else:
+        if telegram_id_raw and (not telegram_id_raw.isdigit() or not 5 <= len(telegram_id_raw) <= 20):
+            return web.json_response({"success": False, "message": "Проверьте Telegram ID"}, status=422)
+        telegram_id = int(telegram_id_raw) if telegram_id_raw else None
+        if client_type not in {"private", "corporate"}:
+            return web.json_response({"success": False, "message": "Выберите формат"}, status=422)
     if client_type == "corporate" and not company:
         return web.json_response({"success": False, "message": "Укажите компанию"}, status=422)
     if contact_method not in {"phone", "telegram", "whatsapp", "email"}:
         return web.json_response({"success": False, "message": "Выберите способ связи"}, status=422)
+    if site_role == "client" and contact_method == "telegram" and len(contact_value) < 2:
+        return web.json_response(
+            {"success": False, "message": "Укажите Telegram nickname, например @username"},
+            status=422,
+        )
+    if site_role == "client" and contact_method == "email":
+        if "@" not in contact_value or "." not in contact_value.rsplit("@", 1)[-1]:
+            return web.json_response(
+                {"success": False, "message": "Укажите электронную почту для связи"},
+                status=422,
+            )
+        email = contact_value
 
     registration_id = "site-" + secrets.token_hex(12)
     access_token = secrets.token_urlsafe(32)
@@ -147,6 +185,7 @@ async def create_registration(request: web.Request) -> web.Response:
             client_type=client_type,
             company=company,
             contact_method=contact_method,
+            contact_value=contact_value,
             site_role=site_role,
         )
     except Exception:

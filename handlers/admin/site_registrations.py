@@ -60,9 +60,38 @@ async def moderate_site_registration(call: CallbackQuery, settings: Settings) ->
         await call.answer("Регистрация не найдена в базе бота. Попросите клиента отправить форму ещё раз.", show_alert=True)
         return
     if registration is not None and action == "approve":
+        site_role = str(registration.get("site_role") or "client")
+        if site_role != "manager":
+            await set_site_registration_status(
+                settings.db_path,
+                registration_id,
+                "approved",
+                call.from_user.id,
+            )
+            delivered = await send_registration_decision(
+                settings.site_registration_hook_url,
+                settings.site_registration_secret,
+                registration_id,
+                "approve",
+                call.from_user.id,
+            )
+            result_text = "✅ Доступ клиента открыт"
+            if delivered is False:
+                result_text += "\n\nСтатус сохранён в базе. Сайт увидит его при следующей проверке."
+            if call.message:
+                try:
+                    await call.message.edit_text(
+                        f"{call.message.html_text}\n\n<b>{result_text}</b>",
+                        reply_markup=None,
+                    )
+                except Exception:
+                    await call.message.answer(result_text)
+            await call.answer("Доступ клиента открыт")
+            return
+
         telegram_id = int(registration.get("telegram_id") or 0)
         if telegram_id <= 0:
-            await call.answer("В регистрации не указан Telegram ID", show_alert=True)
+            await call.answer("Для менеджера не указан Telegram ID", show_alert=True)
             return
         await set_site_registration_status(settings.db_path, registration_id, "awaiting_user", call.from_user.id)
         confirmation_markup = InlineKeyboardMarkup(inline_keyboard=[[
@@ -70,11 +99,10 @@ async def moderate_site_registration(call: CallbackQuery, settings: Settings) ->
             InlineKeyboardButton(text="❌ Нет, не я", callback_data=f"site_user:no:{registration_id}"),
         ]])
         try:
-            role_label = "менеджера" if str(registration.get("site_role") or "client") == "manager" else "клиента"
             await call.bot.send_message(
                 telegram_id,
                 "🪪 <b>Подтверждение регистрации</b>\n\n"
-                f"Вы подавали заявку на доступ {role_label} к сайту «ГУДВИН КОНСАЛТИНГ»?",
+                "Вы подавали заявку на служебный доступ менеджера к сайту «ГУДВИН КОНСАЛТИНГ»?",
                 reply_markup=confirmation_markup,
             )
         except Exception:

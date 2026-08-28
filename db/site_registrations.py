@@ -27,6 +27,7 @@ async def init_site_registrations_db(db_path: str) -> None:
                 client_type TEXT NOT NULL,
                 company TEXT,
                 contact_method TEXT NOT NULL,
+                contact_value TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 moderator_tg_id INTEGER,
                 created_at TEXT NOT NULL,
@@ -41,6 +42,8 @@ async def init_site_registrations_db(db_path: str) -> None:
             await db.execute("ALTER TABLE site_registrations ADD COLUMN telegram_id INTEGER")
         if "site_role" not in columns:
             await db.execute("ALTER TABLE site_registrations ADD COLUMN site_role TEXT NOT NULL DEFAULT 'client'")
+        if "contact_value" not in columns:
+            await db.execute("ALTER TABLE site_registrations ADD COLUMN contact_value TEXT")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_site_registrations_status ON site_registrations(status)"
         )
@@ -58,10 +61,11 @@ async def create_site_registration(
     full_name: str,
     phone: str,
     email: str,
-    telegram_id: int,
+    telegram_id: int | None,
     client_type: str,
     company: str,
     contact_method: str,
+    contact_value: str = "",
     site_role: str = "client",
 ) -> dict[str, Any]:
     now = _utcnow()
@@ -71,8 +75,8 @@ async def create_site_registration(
             """
             INSERT INTO site_registrations (
                 id, access_token_hash, full_name, phone, email, telegram_id, site_role,
-                client_type, company, contact_method, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                client_type, company, contact_method, contact_value, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
             (
                 registration_id,
@@ -85,6 +89,7 @@ async def create_site_registration(
                 client_type,
                 company,
                 contact_method,
+                contact_value,
                 now,
                 now,
             ),
@@ -102,7 +107,7 @@ async def get_site_registration(db_path: str, registration_id: str) -> dict[str,
         cursor = await db.execute(
             """
             SELECT id, full_name, phone, email, telegram_id, site_role, client_type, company,
-                   contact_method, status, moderator_tg_id,
+                   contact_method, contact_value, status, moderator_tg_id,
                    created_at, updated_at, moderated_at
             FROM site_registrations
             WHERE id = ?
@@ -170,7 +175,7 @@ async def list_site_registrations(db_path: str, limit: int = 10000) -> list[dict
         cursor = await db.execute(
             """
             SELECT id, full_name, phone, email, telegram_id, site_role, client_type, company,
-                   contact_method, status, moderator_tg_id,
+                   contact_method, contact_value, status, moderator_tg_id,
                    created_at, updated_at, moderated_at
             FROM site_registrations
             ORDER BY created_at DESC

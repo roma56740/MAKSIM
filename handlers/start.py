@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, Message, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from urllib.parse import urlsplit, urlunsplit
 
 from callbacks import AdminRegCb, UserRegCb
 from config import Settings
@@ -65,19 +66,40 @@ async def _notify_admins_new_registration(
 async def cmd_start(message: Message, state: FSMContext, settings: Settings) -> None:
     await state.clear()
 
+    admin_access = await is_admin(settings.db_path, message.from_user.id, settings.admin_ids)
+    user = await get_user(settings.db_path, message.from_user.id)
     start_argument = (message.text or "").partition(" ")[2].strip().casefold()
-    if start_argument in {"site", "site_manager"}:
+    if start_argument == "site_manager":
+        if not admin_access and not (user and user.get("status") == "approved"):
+            await message.answer(
+                "⛔ Служебная регистрация доступна только действующим сотрудникам, "
+                "которым уже открыт доступ к этому боту."
+            )
+        else:
+            builder = InlineKeyboardBuilder()
+            hook_url = (settings.site_registration_hook_url or "").strip()
+            if hook_url:
+                parsed = urlsplit(hook_url)
+                manager_url = urlunsplit((parsed.scheme, parsed.netloc, "/manager-registration.php", "", ""))
+                if parsed.scheme in {"http", "https"} and parsed.netloc:
+                    builder.button(text="Открыть служебную форму", url=manager_url)
+            await message.answer(
+                "🌐 <b>Ваш Telegram ID для регистрации менеджера:</b>\n\n"
+                f"<code>{message.from_user.id}</code>\n\n"
+                "Этот ID привязан к вашему подтверждённому профилю сотрудника. "
+                "Скопируйте число и вставьте его в служебную форму на сайте.",
+                reply_markup=builder.as_markup() if builder.buttons else None,
+            )
+    elif start_argument == "site":
         await message.answer(
-            "🌐 <b>Ваш Telegram ID для регистрации на сайте:</b>\n\n"
-            f"<code>{message.from_user.id}</code>\n\n"
-            "Нажмите на число, скопируйте его и вставьте в форму на сайте."
+            "🌐 Для обычной клиентской регистрации Telegram ID больше не нужен. "
+            "Вернитесь на сайт и заполните короткую форму."
         )
 
-    if await is_admin(settings.db_path, message.from_user.id, settings.admin_ids):
+    if admin_access:
         await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_main_kb())
         return
 
-    user = await get_user(settings.db_path, message.from_user.id)
     if user:
         await update_user_telegram_profile(
             settings.db_path,
