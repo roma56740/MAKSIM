@@ -101,7 +101,11 @@ async def list_active_promotions(db_path: str, now_iso: str) -> list[dict[str, A
                 SELECT *
                 FROM promotions
                 WHERE status = 'active'
-                  AND (expires_at IS NULL OR expires_at > ?)
+                  AND (
+                    expires_at IS NULL OR TRIM(expires_at) = ''
+                    OR julianday(expires_at) IS NULL
+                    OR julianday(expires_at) > julianday(?)
+                  )
                 ORDER BY created_at DESC, id DESC
                 """,
                 (now_iso,),
@@ -119,7 +123,9 @@ async def list_due_promotion_ids(db_path: str, now_iso: str) -> list[int]:
                 FROM promotions
                 WHERE status = 'active'
                   AND expires_at IS NOT NULL
-                  AND expires_at <= ?
+                  AND TRIM(expires_at) <> ''
+                  AND julianday(expires_at) IS NOT NULL
+                  AND julianday(expires_at) <= julianday(?)
                 ORDER BY expires_at ASC
                 """,
                 (now_iso,),

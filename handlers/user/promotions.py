@@ -22,6 +22,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _is_expired(value: object) -> bool:
+    if not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc) <= datetime.now(timezone.utc)
+    except ValueError:
+        # Старая некорректная дата не должна удалять предложение из раздела.
+        return False
+
+
 def _list_kb(items: list[dict], page: int, total_pages: int):
     kb = InlineKeyboardBuilder()
     for item in items:
@@ -77,7 +90,7 @@ async def user_promotion_view(call: CallbackQuery, settings: Settings) -> None:
     if (
         not item
         or item.get("status") != "active"
-        or (item.get("expires_at") and str(item["expires_at"]) <= _now_iso())
+        or _is_expired(item.get("expires_at"))
     ):
         await call.answer("Предложение уже завершено", show_alert=True)
         return

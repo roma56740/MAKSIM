@@ -149,7 +149,7 @@ def _review_kb(invoice_id: int) -> InlineKeyboardBuilder:
 
 
 async def _show_review(message: Message, invoice_id: int, analysis: dict) -> None:
-    await message.answer(analysis_header(analysis, invoice_id=invoice_id))
+    await message.answer(analysis_header(analysis, invoice_id=invoice_id, include_duplicate_details=True))
     for chunk in split_item_messages(analysis):
         await message.answer(chunk)
     await message.answer(

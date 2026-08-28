@@ -61,7 +61,9 @@ def _analysis_badge(invoice: dict) -> str:
     status = str(invoice.get("analysis_status") or "pending")
     analysis = decode_invoice_analysis(invoice)
     if status == "completed" and analysis:
-        return f"🤖 Распознано: <b>{len(analysis.get('items') or [])}</b> поз."
+        duplicate_count = len(analysis.get("duplicate_matches") or [])
+        duplicate_badge = f"\n🚨 Возможный повтор: <b>{duplicate_count}</b>" if duplicate_count else ""
+        return f"🤖 Распознано: <b>{len(analysis.get('items') or [])}</b> поз.{duplicate_badge}"
     if status == "failed":
         return "⚠️ Распознавание не завершено"
     if status == "processing":

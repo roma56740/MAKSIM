@@ -179,6 +179,22 @@ async def init_db(db_path: str) -> None:
                 await db.execute("ALTER TABLE invoices ADD COLUMN analysis_error TEXT;")
             if "analyzed_at" not in invoice_cols:
                 await db.execute("ALTER TABLE invoices ADD COLUMN analyzed_at TEXT;")
+            if "invoice_number" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN invoice_number TEXT;")
+            if "invoice_number_key" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN invoice_number_key TEXT;")
+            if "invoice_date" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN invoice_date TEXT;")
+            if "company_name" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN company_name TEXT;")
+            if "company_key" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN company_key TEXT;")
+            if "document_total" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN document_total REAL;")
+            if "duplicate_of_id" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN duplicate_of_id INTEGER;")
+            if "duplicate_warning_json" not in invoice_cols:
+                await db.execute("ALTER TABLE invoices ADD COLUMN duplicate_warning_json TEXT;")
 
             await db.execute(
                 """
@@ -191,6 +207,9 @@ async def init_db(db_path: str) -> None:
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_handled_at ON invoices(handled_at);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_analysis_status ON invoices(analysis_status);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_number_key ON invoices(invoice_number_key);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_date_total ON invoices(invoice_date, document_total);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_invoices_company_key ON invoices(company_key);")
 
         # --------------------- INVOICE ITEMS (товары из накладных) ---------------------
         await db.execute(

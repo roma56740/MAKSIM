@@ -65,6 +65,14 @@ async def _notify_admins_new_registration(
 async def cmd_start(message: Message, state: FSMContext, settings: Settings) -> None:
     await state.clear()
 
+    start_argument = (message.text or "").partition(" ")[2].strip().casefold()
+    if start_argument in {"site", "site_manager"}:
+        await message.answer(
+            "🌐 <b>Ваш Telegram ID для регистрации на сайте:</b>\n\n"
+            f"<code>{message.from_user.id}</code>\n\n"
+            "Нажмите на число, скопируйте его и вставьте в форму на сайте."
+        )
+
     if await is_admin(settings.db_path, message.from_user.id, settings.admin_ids):
         await message.answer("🛠 <b>Админ-панель</b>", reply_markup=admin_main_kb())
         return

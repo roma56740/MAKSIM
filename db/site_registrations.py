@@ -23,6 +23,7 @@ async def init_site_registrations_db(db_path: str) -> None:
                 phone TEXT NOT NULL,
                 email TEXT,
                 telegram_id INTEGER,
+                site_role TEXT NOT NULL DEFAULT 'client',
                 client_type TEXT NOT NULL,
                 company TEXT,
                 contact_method TEXT NOT NULL,
@@ -38,6 +39,8 @@ async def init_site_registrations_db(db_path: str) -> None:
         columns = {str(row[1]) for row in await columns_cursor.fetchall()}
         if "telegram_id" not in columns:
             await db.execute("ALTER TABLE site_registrations ADD COLUMN telegram_id INTEGER")
+        if "site_role" not in columns:
+            await db.execute("ALTER TABLE site_registrations ADD COLUMN site_role TEXT NOT NULL DEFAULT 'client'")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_site_registrations_status ON site_registrations(status)"
         )
@@ -59,6 +62,7 @@ async def create_site_registration(
     client_type: str,
     company: str,
     contact_method: str,
+    site_role: str = "client",
 ) -> dict[str, Any]:
     now = _utcnow()
     token_hash = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
@@ -66,9 +70,9 @@ async def create_site_registration(
         await db.execute(
             """
             INSERT INTO site_registrations (
-                id, access_token_hash, full_name, phone, email, telegram_id,
+                id, access_token_hash, full_name, phone, email, telegram_id, site_role,
                 client_type, company, contact_method, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             """,
             (
                 registration_id,
@@ -77,6 +81,7 @@ async def create_site_registration(
                 phone,
                 email,
                 telegram_id,
+                "manager" if site_role == "manager" else "client",
                 client_type,
                 company,
                 contact_method,
@@ -96,7 +101,7 @@ async def get_site_registration(db_path: str, registration_id: str) -> dict[str,
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT id, full_name, phone, email, telegram_id, client_type, company,
+            SELECT id, full_name, phone, email, telegram_id, site_role, client_type, company,
                    contact_method, status, moderator_tg_id,
                    created_at, updated_at, moderated_at
             FROM site_registrations
@@ -164,7 +169,7 @@ async def list_site_registrations(db_path: str, limit: int = 10000) -> list[dict
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT id, full_name, phone, email, telegram_id, client_type, company,
+            SELECT id, full_name, phone, email, telegram_id, site_role, client_type, company,
                    contact_method, status, moderator_tg_id,
                    created_at, updated_at, moderated_at
             FROM site_registrations

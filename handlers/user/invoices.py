@@ -188,6 +188,51 @@ async def _notify_admins_new_invoice(message: Message, settings: Settings, invoi
             continue
 
 
+async def _notify_admins_duplicate_invoice(
+    message: Message,
+    settings: Settings,
+    invoice_id: int,
+    analysis: dict,
+) -> None:
+    matches = list(analysis.get("duplicate_matches") or [])
+    if not matches:
+        return
+    inv = await get_invoice_full(settings.db_path, invoice_id)
+    admin_ids = set(settings.admin_ids)
+    try:
+        admin_ids.update(int(value) for value in await list_db_admin_ids(settings.db_path))
+    except Exception:
+        pass
+    lines = [
+        "🚨 <b>ВОЗМОЖНЫЙ ПОВТОР НАКЛАДНОЙ</b>",
+        "",
+        f"Новая накладная: <b>#{invoice_id}</b>",
+        f"Менеджер: <b>{html.escape(str((inv or {}).get('user_full_name') or '—'))}</b>",
+        f"Номер документа: <b>{html.escape(str(analysis.get('invoice_number') or '—'))}</b>",
+        f"Дата: <b>{html.escape(str(analysis.get('invoice_date') or '—'))}</b>",
+        f"Сумма: <b>{money(analysis.get('amount_payable') or analysis.get('total_amount'))}</b> RUB",
+        "",
+        "<b>Совпало с:</b>",
+    ]
+    for match in matches[:5]:
+        reasons = ", ".join(str(reason) for reason in match.get("reasons") or [])
+        lines.append(
+            f"• накладная <b>#{int(match.get('invoice_id') or 0)}</b>"
+            f" · {html.escape(str(match.get('invoice_date') or 'дата —'))}"
+            f" · {money(match.get('document_total'))} RUB"
+            f" · {html.escape(reasons)}"
+        )
+    lines.extend(["", "Проверьте документ до одобрения и начисления."])
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"🔎 Проверить #{invoice_id}", callback_data=f"ainv:approve:{invoice_id}")
+    kb.adjust(1)
+    for admin_id in sorted(admin_ids):
+        try:
+            await message.bot.send_message(admin_id, "\n".join(lines), reply_markup=kb.as_markup())
+        except Exception:
+            continue
+
+
 @router.message(F.text == "🧾 Накладные")
 async def invoices_root(message: Message, settings: Settings) -> None:
     stats = await count_user_invoices_by_status(settings.db_path, message.from_user.id)
@@ -263,6 +308,7 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
         analysis = await analyze_invoice_from_telegram(
             message.bot, settings.db_path, invoice_id
         )
+        await _notify_admins_duplicate_invoice(message, settings, invoice_id, analysis)
         try:
             await progress.edit_text(
                 "✅ <b>Накладная распознана</b>\n\n"

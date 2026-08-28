@@ -43,7 +43,12 @@ async def _notify_admins(bot: Bot, settings: Settings, registration: dict[str, A
         logger.warning("Site registration saved, but no administrators are configured")
         return
 
-    client_label = "Корпоративный клиент" if registration["client_type"] == "corporate" else "Частный клиент"
+    site_role = str(registration.get("site_role") or "client")
+    client_label = (
+        "Менеджер"
+        if site_role == "manager"
+        else ("Корпоративный клиент" if registration["client_type"] == "corporate" else "Частный клиент")
+    )
     methods = {
         "phone": "Телефонный звонок",
         "telegram": "Telegram",
@@ -109,6 +114,7 @@ async def create_registration(request: web.Request) -> web.Response:
     email = _clean(payload.get("email"), 160)
     telegram_id_raw = _clean(payload.get("telegram_id"), 24)
     company = _clean(payload.get("company"), 180)
+    site_role = "manager" if _clean(payload.get("site_role"), 20) == "manager" else "client"
     client_type = _clean(payload.get("client_type"), 20)
     contact_method = _clean(payload.get("contact_method"), 20)
     if len(full_name) < 2 or len(phone) < 7:
@@ -118,7 +124,9 @@ async def create_registration(request: web.Request) -> web.Response:
     if not telegram_id_raw.isdigit() or not 5 <= len(telegram_id_raw) <= 20:
         return web.json_response({"success": False, "message": "Укажите числовой Telegram ID"}, status=422)
     telegram_id = int(telegram_id_raw)
-    if client_type not in {"private", "corporate"}:
+    if site_role == "manager":
+        client_type = "manager"
+    elif client_type not in {"private", "corporate"}:
         return web.json_response({"success": False, "message": "Выберите формат"}, status=422)
     if client_type == "corporate" and not company:
         return web.json_response({"success": False, "message": "Укажите компанию"}, status=422)
@@ -139,6 +147,7 @@ async def create_registration(request: web.Request) -> web.Response:
             client_type=client_type,
             company=company,
             contact_method=contact_method,
+            site_role=site_role,
         )
     except Exception:
         logger.exception("Could not save a site registration")

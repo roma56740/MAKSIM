@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import math
+import re
 from typing import Any
 
 import aiosqlite
@@ -14,6 +15,141 @@ def _utcnow() -> str:
 
 def _product_key(value: str) -> str:
     return " ".join(str(value or "").split()).casefold()
+
+
+def _identity_key(value: Any) -> str:
+    return re.sub(r"[^0-9a-zа-яё]+", "", str(value or "").casefold())
+
+
+def _invoice_date_key(value: Any) -> str:
+    raw = " ".join(str(value or "").split())
+    for pattern in (r"(\d{4})[-./](\d{1,2})[-./](\d{1,2})", r"(\d{1,2})[-./](\d{1,2})[-./](\d{4})"):
+        match = re.search(pattern, raw)
+        if not match:
+            continue
+        first, second, third = (int(part) for part in match.groups())
+        year, month, day = (first, second, third) if len(match.group(1)) == 4 else (third, second, first)
+        try:
+            return datetime(year, month, day).date().isoformat()
+        except ValueError:
+            return ""
+    return ""
+
+
+def _analysis_total(analysis: dict[str, Any]) -> float | None:
+    for key in ("amount_payable", "total_amount", "calculated_total"):
+        try:
+            value = float(analysis.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value >= 0:
+            return round(value, 2)
+    return None
+
+
+def invoice_identity(analysis: dict[str, Any]) -> dict[str, Any]:
+    company_name = " ".join(str(analysis.get("supplier") or "").split())[:300]
+    invoice_number = " ".join(str(analysis.get("invoice_number") or "").split())[:150]
+    return {
+        "invoice_number": invoice_number,
+        "invoice_number_key": _identity_key(invoice_number),
+        "invoice_date": _invoice_date_key(analysis.get("invoice_date")),
+        "company_name": company_name,
+        "company_key": _identity_key(company_name),
+        "document_total": _analysis_total(analysis),
+    }
+
+
+def duplicate_match_reasons(current: dict[str, Any], candidate: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if current.get("invoice_number_key") and current["invoice_number_key"] == candidate.get("invoice_number_key"):
+        reasons.append("тот же номер")
+    if current.get("invoice_date") and current["invoice_date"] == candidate.get("invoice_date"):
+        reasons.append("та же дата")
+    if current.get("company_key") and current["company_key"] == candidate.get("company_key"):
+        reasons.append("тот же поставщик")
+    current_total = current.get("document_total")
+    candidate_total = candidate.get("document_total")
+    if current_total is not None and candidate_total is not None:
+        tolerance = max(1.0, abs(float(current_total)) * 0.0001)
+        if abs(float(current_total) - float(candidate_total)) <= tolerance:
+            reasons.append("та же сумма")
+
+    # Два независимых совпадения дают предупреждение. Совпадение даты и суммы
+    # без номера считаем достаточным только вместе с поставщиком.
+    if "тот же номер" in reasons and len(reasons) >= 2:
+        return reasons
+    if {"та же дата", "тот же поставщик", "та же сумма"}.issubset(reasons):
+        return reasons
+    return []
+
+
+async def find_invoice_duplicates(
+    db_path: str,
+    invoice_id: int,
+    analysis: dict[str, Any],
+    *,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    current = invoice_identity(analysis)
+    if not any(current.values()):
+        return []
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (
+            await db.execute(
+                """
+                SELECT i.id, i.tg_id, i.status, i.file_id, i.created_at,
+                       i.invoice_number, i.invoice_number_key, i.invoice_date,
+                       i.company_name, i.company_key, i.document_total,
+                       i.analysis_json, u.full_name AS user_full_name
+                FROM invoices i
+                LEFT JOIN users u ON u.tg_id = i.tg_id
+                WHERE i.id <> ?
+                  AND (i.analysis_json IS NOT NULL OR i.invoice_number_key IS NOT NULL)
+                ORDER BY i.id DESC
+                LIMIT 5000
+                """,
+                (invoice_id,),
+            )
+        ).fetchall()
+
+    matches: list[dict[str, Any]] = []
+    for row in rows:
+        candidate = dict(row)
+        candidate_analysis: dict[str, Any] = {}
+        try:
+            decoded = json.loads(str(candidate.get("analysis_json") or "{}"))
+            if isinstance(decoded, dict):
+                candidate_analysis = decoded
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        fallback = invoice_identity(candidate_analysis)
+        candidate_identity = {
+            "invoice_number": candidate.get("invoice_number") or fallback["invoice_number"],
+            "invoice_number_key": candidate.get("invoice_number_key") or fallback["invoice_number_key"],
+            "invoice_date": candidate.get("invoice_date") or fallback["invoice_date"],
+            "company_name": candidate.get("company_name") or fallback["company_name"],
+            "company_key": candidate.get("company_key") or fallback["company_key"],
+            "document_total": candidate.get("document_total") if candidate.get("document_total") is not None else fallback["document_total"],
+        }
+        reasons = duplicate_match_reasons(current, candidate_identity)
+        if not reasons:
+            continue
+        matches.append({
+            "invoice_id": int(candidate["id"]),
+            "tg_id": int(candidate["tg_id"]),
+            "user_full_name": str(candidate.get("user_full_name") or ""),
+            "status": str(candidate.get("status") or "pending"),
+            "invoice_number": str(candidate_identity["invoice_number"] or ""),
+            "invoice_date": str(candidate_identity["invoice_date"] or ""),
+            "supplier": str(candidate_identity["company_name"] or ""),
+            "document_total": candidate_identity["document_total"],
+            "created_at": str(candidate.get("created_at") or ""),
+            "reasons": reasons,
+        })
+    matches.sort(key=lambda item: (-len(item["reasons"]), -int(item["invoice_id"])))
+    return matches[: max(1, min(20, int(limit)))]
 
 
 async def create_invoice(
@@ -64,15 +200,36 @@ async def save_invoice_analysis(
     analysis: dict[str, Any],
 ) -> None:
     now = _utcnow()
+    identity = invoice_identity(analysis)
+    duplicates = await find_invoice_duplicates(db_path, invoice_id, analysis)
+    analysis["duplicate_matches"] = duplicates
     payload = json.dumps(analysis, ensure_ascii=False, separators=(",", ":"))
+    duplicate_payload = json.dumps(duplicates, ensure_ascii=False, separators=(",", ":")) if duplicates else None
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
             """
             UPDATE invoices
-            SET analysis_status='completed', analysis_json=?, analysis_error=NULL, analyzed_at=?, updated_at=?
+            SET analysis_status='completed', analysis_json=?, analysis_error=NULL,
+                invoice_number=?, invoice_number_key=?, invoice_date=?,
+                company_name=?, company_key=?, document_total=?,
+                duplicate_of_id=?, duplicate_warning_json=?,
+                analyzed_at=?, updated_at=?
             WHERE id=?
             """,
-            (payload, now, now, invoice_id),
+            (
+                payload,
+                identity["invoice_number"] or None,
+                identity["invoice_number_key"] or None,
+                identity["invoice_date"] or None,
+                identity["company_name"] or None,
+                identity["company_key"] or None,
+                identity["document_total"],
+                int(duplicates[0]["invoice_id"]) if duplicates else None,
+                duplicate_payload,
+                now,
+                now,
+                invoice_id,
+            ),
         )
         await db.commit()
 

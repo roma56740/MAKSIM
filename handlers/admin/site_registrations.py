@@ -70,10 +70,11 @@ async def moderate_site_registration(call: CallbackQuery, settings: Settings) ->
             InlineKeyboardButton(text="❌ Нет, не я", callback_data=f"site_user:no:{registration_id}"),
         ]])
         try:
+            role_label = "менеджера" if str(registration.get("site_role") or "client") == "manager" else "клиента"
             await call.bot.send_message(
                 telegram_id,
                 "🪪 <b>Подтверждение регистрации</b>\n\n"
-                "Вы подавали заявку на доступ к сайту «Хорошее вино»?",
+                f"Вы подавали заявку на доступ {role_label} к сайту «ГУДВИН КОНСАЛТИНГ»?",
                 reply_markup=confirmation_markup,
             )
         except Exception:

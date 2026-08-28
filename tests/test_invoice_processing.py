@@ -15,8 +15,14 @@ except ModuleNotFoundError:  # позволяет запускать чисты�
     openai_stub.AsyncOpenAI = object
     sys.modules["openai"] = openai_stub
 
+try:
+    import aiosqlite  # noqa: F401
+except ModuleNotFoundError:  # чистые тесты нормализации не открывают БД
+    sys.modules["aiosqlite"] = types.ModuleType("aiosqlite")
+
 from services.invoice_excel import _number, recognize_invoice_excel
 from services.invoice_recognition import InvoiceFile, normalize_invoice_result
+from db.invoices import duplicate_match_reasons, invoice_identity
 
 
 def _raw_result(*, items: list[dict], payable: float | None) -> dict:
@@ -128,6 +134,39 @@ class InvoiceExcelTests(unittest.TestCase):
         self.assertEqual(result["amount_payable"], 80000)
         self.assertEqual(result["calculated_total"], 80000)
         self.assertEqual(result["discount_amount"], 28000)
+
+
+class InvoiceDuplicateTests(unittest.TestCase):
+    def test_same_document_is_flagged_despite_number_formatting(self) -> None:
+        first = invoice_identity({
+            "invoice_number": "УПД № 15/26",
+            "invoice_date": "25.08.2026",
+            "supplier": "ООО «Поставщик»",
+            "amount_payable": 80_000,
+        })
+        second = invoice_identity({
+            "invoice_number": "УПД-15/26",
+            "invoice_date": "2026-08-25",
+            "supplier": "ООО Поставщик",
+            "total_amount": 80_000,
+        })
+        self.assertEqual(
+            duplicate_match_reasons(first, second),
+            ["тот же номер", "та же дата", "тот же поставщик", "та же сумма"],
+        )
+
+    def test_date_and_total_alone_are_not_enough(self) -> None:
+        first = invoice_identity({
+            "invoice_date": "25.08.2026",
+            "supplier": "Поставщик А",
+            "amount_payable": 80_000,
+        })
+        second = invoice_identity({
+            "invoice_date": "25.08.2026",
+            "supplier": "Поставщик Б",
+            "amount_payable": 80_000,
+        })
+        self.assertEqual(duplicate_match_reasons(first, second), [])
 
 
 if __name__ == "__main__":

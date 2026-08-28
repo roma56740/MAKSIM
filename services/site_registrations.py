@@ -22,6 +22,7 @@ def registration_from_message(text: str) -> dict[str, str]:
         "Телефон": "phone",
         "Email": "email",
         "Telegram ID": "telegram_id",
+        "Роль сайта": "site_role",
         "Связаться через": "contact_label",
         "Дата": "date_label",
     }
@@ -36,6 +37,7 @@ def registration_from_message(text: str) -> dict[str, str]:
             result[key] = value.strip()
     client_label = result.get("client_label", "")
     result["client_type"] = "corporate" if "Корпоратив" in client_label else "private"
+    result["site_role"] = "manager" if "Менеджер" in client_label else "client"
     return result
 
 
@@ -72,6 +74,7 @@ async def save_registration_decision(
                 "phone": source.get("phone", ""),
                 "email": source.get("email", ""),
                 "telegram_id": source.get("telegram_id", ""),
+                "site_role": source.get("site_role", "client"),
                 "company": source.get("company", ""),
                 "client_type": source.get("client_type", "private"),
                 "contact_label": source.get("contact_label", ""),

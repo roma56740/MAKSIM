@@ -4,7 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
-from config import load_settings
+from config import load_settings, prepare_storage
 from db import init_db
 from db.surveys import init_surveys_db
 from db.site_registrations import init_site_registrations_db
@@ -50,6 +50,8 @@ from services.promotions import promotion_expiry_worker
 
 async def main() -> None:
     settings = load_settings()
+    for source, target in prepare_storage(settings):
+        logging.info("Initial storage copied: %s -> %s", source, target)
     logging.info("DB_PATH = %s", settings.db_path)
 
     await init_db(settings.db_path)

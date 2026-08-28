@@ -66,7 +66,12 @@ def deal_amount_from_analysis(analysis: dict[str, Any]) -> float:
     )
 
 
-def analysis_header(analysis: dict[str, Any], *, invoice_id: int | None = None) -> str:
+def analysis_header(
+    analysis: dict[str, Any],
+    *,
+    invoice_id: int | None = None,
+    include_duplicate_details: bool = False,
+) -> str:
     prefix = f"🧾 <b>Накладная #{invoice_id}</b>\n" if invoice_id is not None else "🧾 <b>Результат распознавания</b>\n"
     items = list(analysis.get("items") or [])
     lines = [
@@ -97,6 +102,22 @@ def analysis_header(analysis: dict[str, Any], *, invoice_id: int | None = None) 
         except (TypeError, ValueError):
             pass
     warnings = list(analysis.get("warnings") or [])
+    duplicate_matches = list(analysis.get("duplicate_matches") or [])
+    if duplicate_matches:
+        lines.append(
+            f"\n🚨 <b>Возможный повтор накладной: найдено совпадений — {len(duplicate_matches)}</b>"
+        )
+        if include_duplicate_details:
+            for match in duplicate_matches[:5]:
+                reasons = ", ".join(str(reason) for reason in match.get("reasons") or [])
+                lines.append(
+                    f"• Накладная <b>#{int(match.get('invoice_id') or 0)}</b>"
+                    f" · {html.escape(str(match.get('invoice_date') or 'дата не указана'))}"
+                    f" · {money(match.get('document_total'))} RUB"
+                    f" · {html.escape(reasons or 'совпали реквизиты')}"
+                )
+        else:
+            lines.append("Администратор получил номера совпавших накладных и проверит их перед одобрением.")
     if warnings:
         lines.append("\n⚠️ <b>Нужно проверить:</b>")
         for warning in warnings[:5]:
