@@ -4,6 +4,7 @@ import sys
 import types
 import unittest
 from io import BytesIO
+from unittest.mock import patch
 
 from openpyxl import Workbook
 
@@ -21,7 +22,13 @@ except ModuleNotFoundError:  # чистые тесты нормализации 
     sys.modules["aiosqlite"] = types.ModuleType("aiosqlite")
 
 from services.invoice_excel import _number, recognize_invoice_excel
-from services.invoice_recognition import InvoiceFile, normalize_invoice_result
+from services.invoice_recognition import (
+    InvoiceFile,
+    _friendly_api_error,
+    _model_candidates,
+    normalize_invoice_result,
+)
+from services.invoice_format import TELEGRAM_SAFE_TEXT_LENGTH, render_invoice_message
 from db.invoices import duplicate_match_reasons, invoice_identity
 
 
@@ -167,6 +174,53 @@ class InvoiceDuplicateTests(unittest.TestCase):
             "amount_payable": 80_000,
         })
         self.assertEqual(duplicate_match_reasons(first, second), [])
+
+
+class InvoiceReliabilityTests(unittest.TestCase):
+    def test_configured_project_model_is_used_before_fallbacks(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"OPENAI_MODEL": "available-model"},
+            clear=True,
+        ):
+            candidates = _model_candidates()
+        self.assertEqual(candidates[0], "available-model")
+        self.assertIn("gpt-4o-mini", candidates)
+
+    def test_rate_limit_has_actionable_safe_message(self) -> None:
+        error = RuntimeError("secret response body")
+        error.status_code = 429
+        message = _friendly_api_error([error])
+        self.assertIn("лимита", message)
+        self.assertNotIn("secret", message)
+
+    def test_large_invoice_is_rendered_as_one_safe_telegram_message(self) -> None:
+        analysis = _raw_result(
+            payable=150_000,
+            items=[
+                {
+                    "article": f"A-{index}",
+                    "product_name": "Очень длинное название товара & специальная серия " * 4,
+                    "quantity": 2,
+                    "unit": "шт",
+                    "unit_price_before_discount": 600,
+                    "discount_percent": None,
+                    "discount_amount": 200,
+                    "unit_price": 500,
+                    "line_total": 1000,
+                }
+                for index in range(150)
+            ],
+        )
+        rendered = render_invoice_message(
+            normalize_invoice_result(analysis),
+            invoice_id=42,
+            footer="🟡 <b>СТАТУС · НА ПРОВЕРКЕ</b>",
+        )
+        self.assertLessEqual(len(rendered), TELEGRAM_SAFE_TEXT_LENGTH)
+        self.assertIn("полный список сохранён", rendered)
+        self.assertNotIn("& специальная", rendered)
+        self.assertEqual(rendered.count("<b>"), rendered.count("</b>"))
 
 
 if __name__ == "__main__":

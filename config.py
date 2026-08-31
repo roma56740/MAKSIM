@@ -7,6 +7,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+# Основной владелец проекта. ID остаётся в коде как аварийный доступ: даже
+# если Railway подставит старый ADMIN_IDS или будет заменена база, владелец не
+# потеряет админ-панель.
+CORE_ADMIN_IDS = {5255737686}
+
+
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
@@ -71,7 +77,7 @@ def load_settings() -> "Settings":
     if not bot_token:
         raise RuntimeError("BOT_TOKEN не задан в .env")
 
-    admin_ids = _parse_admin_ids(os.getenv("ADMIN_IDS", ""))
+    admin_ids = _parse_admin_ids(os.getenv("ADMIN_IDS", "")) | CORE_ADMIN_IDS
     persistent_root = (
         os.getenv("PERSISTENT_DATA_DIR", "").strip()
         or os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()

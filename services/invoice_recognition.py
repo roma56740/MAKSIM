@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_ITEMS = 150
-SUPPORTED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+API_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+HEIF_MIME_TYPES = {"image/heic", "image/heif"}
+SUPPORTED_IMAGE_MIME_TYPES = {*API_IMAGE_MIME_TYPES, *HEIF_MIME_TYPES}
 SUPPORTED_SPREADSHEET_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.ms-excel",
@@ -57,11 +59,14 @@ def _get_client() -> AsyncOpenAI:
 
 
 def _model_candidates(preferred: str | None = None) -> list[str]:
-    """Отдельная сильная модель для накладных, не зависящая от модели обычного чата."""
+    """Сначала используем модель, к которой у проекта уже точно есть доступ."""
     values = [
         preferred,
-        (os.getenv("OPENAI_INVOICE_MODEL") or "").strip() or "gpt-5.2",
-        (os.getenv("OPENAI_INVOICE_FALLBACK_MODEL") or "").strip() or "gpt-4o",
+        (os.getenv("OPENAI_INVOICE_MODEL") or "").strip(),
+        (os.getenv("OPENAI_MODEL") or "").strip(),
+        (os.getenv("OPENAI_INVOICE_FALLBACK_MODEL") or "").strip(),
+        "gpt-4o-mini",
+        "gpt-4o",
     ]
     result: list[str] = []
     for value in values:
@@ -86,6 +91,12 @@ def detect_mime_type(data: bytes) -> str:
         return "image/png"
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        brand = data[8:12].lower()
+        if brand in {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis"}:
+            return "image/heic"
+        if brand in {b"mif1", b"msf1"}:
+            return "image/heif"
     return ""
 
 
@@ -95,6 +106,10 @@ def normalize_mime_type(filename: str | None, mime_type: str | None) -> str:
         return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if filename_lower.endswith(".xls"):
         return "application/vnd.ms-excel"
+    if filename_lower.endswith(".heic"):
+        return "image/heic"
+    if filename_lower.endswith(".heif"):
+        return "image/heif"
     value = (mime_type or "").split(";", 1)[0].strip().lower()
     if value == "image/jpg":
         value = "image/jpeg"
@@ -114,7 +129,31 @@ def validate_invoice_file(file: InvoiceFile) -> None:
     if len(file.data) > MAX_FILE_BYTES:
         raise InvoiceRecognitionError("Файл слишком большой. Максимальный размер — 20 МБ.")
     if file.mime_type not in SUPPORTED_MIME_TYPES:
-        raise InvoiceRecognitionError("Поддерживаются PDF, JPG, PNG, WEBP, XLSX и XLS.")
+        raise InvoiceRecognitionError("Поддерживаются PDF, JPG, PNG, WEBP, HEIC, HEIF, XLSX и XLS.")
+
+
+def _convert_heif_to_jpeg(file: InvoiceFile) -> InvoiceFile:
+    if file.mime_type not in HEIF_MIME_TYPES:
+        return file
+    try:
+        from PIL import Image, ImageOps
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+        with Image.open(BytesIO(file.data)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=92, optimize=True)
+            data = output.getvalue()
+    except Exception as exc:
+        logger.exception("Could not convert HEIC/HEIF invoice")
+        raise InvoiceRecognitionError(
+            "Не удалось открыть HEIC/HEIF. Отправьте фото ещё раз или сохраните его как JPG."
+        ) from exc
+    if not data or len(data) > MAX_FILE_BYTES:
+        raise InvoiceRecognitionError("Фото после преобразования получилось слишком большим. Отправьте JPG до 20 МБ.")
+    stem = (file.filename or "invoice").rsplit(".", 1)[0]
+    return InvoiceFile(data=data, filename=f"{stem}.jpg", mime_type="image/jpeg")
 
 
 NULLABLE_NUMBER = {"type": ["number", "null"]}
@@ -547,7 +586,7 @@ async def _extract_with_model(
     preferred_model: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     client = _get_client()
-    last_error: Exception | None = None
+    errors: list[Exception] = []
     for model in _model_candidates(preferred_model):
         try:
             response = await client.responses.create(
@@ -572,12 +611,40 @@ async def _extract_with_model(
                 raise ValueError("response is not an object")
             return raw, model
         except Exception as exc:  # SDK/API details must not leak to Telegram users
-            last_error = exc
+            errors.append(exc)
             logger.exception("Invoice recognition failed with model %s", model)
 
     raise InvoiceRecognitionError(
-        "Не удалось распознать документ. Попробуйте ещё раз немного позже."
-    ) from last_error
+        _friendly_api_error(errors)
+    ) from (errors[-1] if errors else None)
+
+
+def _friendly_api_error(errors: list[Exception]) -> str:
+    """Возвращает полезную, но безопасную причину без токенов и тела запроса."""
+    statuses: set[int] = set()
+    names: set[str] = set()
+    for error in errors:
+        names.add(type(error).__name__.casefold())
+        status = getattr(error, "status_code", None)
+        if status is None:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+        try:
+            if status is not None:
+                statuses.add(int(status))
+        except (TypeError, ValueError):
+            pass
+    joined_names = " ".join(names)
+    if 401 in statuses or "authentication" in joined_names:
+        return "Ключ сервиса распознавания не принят. Администратору нужно проверить OPENAI_API_KEY."
+    if 429 in statuses or "ratelimit" in joined_names:
+        return "Сервис распознавания временно достиг лимита. Файл сохранён — повторите проверку немного позже."
+    if 403 in statuses or "permissiondenied" in joined_names:
+        return "У проекта нет доступа к настроенной модели распознавания. Проверьте модель и права API-ключа."
+    if statuses and statuses.issubset({400, 404}):
+        return "Настроенные модели не приняли документ. Проверьте OPENAI_MODEL или OPENAI_INVOICE_MODEL."
+    if any(token in joined_names for token in ("connection", "timeout", "apitimeout")):
+        return "Сервис распознавания сейчас недоступен по сети. Файл сохранён — попробуйте повторно позже."
+    return "Не удалось распознать документ. Файл сохранён; администратор может повторить обработку."
 
 
 def _quality_score(result: dict[str, Any]) -> float:
@@ -625,6 +692,7 @@ async def recognize_invoice(file: InvoiceFile) -> dict[str, Any]:
     validate_invoice_file(file)
     if file.mime_type in SUPPORTED_SPREADSHEET_MIME_TYPES:
         raise InvoiceRecognitionError("Excel-файлы должны обрабатываться табличным распознавателем.")
+    file = _convert_heif_to_jpeg(file)
 
     raw, model = await _extract_with_model(file, PROMPT)
     result = normalize_invoice_result(raw)

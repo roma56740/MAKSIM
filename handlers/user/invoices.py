@@ -28,11 +28,10 @@ from services.invoice_recognition import (
     normalize_mime_type,
 )
 from services.invoice_workflow import (
-    analysis_header,
     analyze_invoice_from_telegram,
     money,
-    split_item_messages,
 )
+from services.invoice_format import render_invoice_message
 
 router = Router()
 router.message.filter(NotAdmin())
@@ -259,7 +258,7 @@ async def invoice_new_start(cbq: CallbackQuery, state: FSMContext) -> None:
 
     await cbq.message.answer(
         "📎 <b>Отправьте накладную</b> (фото или документ).\n\n"
-        "Поддерживаются PDF, JPG, PNG, WEBP, XLSX и XLS.\n"
+        "Поддерживаются PDF, JPG, PNG, WEBP, HEIC, HEIF, XLSX и XLS.\n"
         "Для точного чтения мелкого текста лучше отправить фото как файл без сжатия.\n"
         "После отправки она автоматически уйдёт админам на проверку ✅",
         reply_markup=user_back_cancel_kb(),
@@ -280,7 +279,7 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
         source_mime_type = normalize_mime_type(source_file_name, message.document.mime_type)
         if source_mime_type not in SUPPORTED_MIME_TYPES:
             await message.answer(
-                "⚠️ Отправьте накладную в формате <b>PDF, JPG, PNG, WEBP, XLSX или XLS</b>."
+                "⚠️ Отправьте накладную в формате <b>PDF, JPG, PNG, WEBP, HEIC, HEIF, XLSX или XLS</b>."
             )
             return
 
@@ -299,9 +298,12 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
     await _notify_admins_new_invoice(message, settings, invoice_id)
 
     progress = await message.answer(
-        "🔎 <b>Анализирую накладную…</b>\n\n"
-        "Проверяю номер, дату, все товары, скидки и итог к оплате. "
-        "Для большой накладной это может занять до минуты."
+        "⏳ <b>ЗАГРУЖАЮ И АНАЛИЗИРУЮ…</b>\n\n"
+        "🔎 Проверяю номер и дату\n"
+        "📦 Читаю все товарные строки\n"
+        "💳 Сверяю скидки и итог к оплате\n\n"
+        "Большой документ может обрабатываться до минуты.",
+        reply_markup=user_main_kb(),
     )
 
     try:
@@ -309,22 +311,15 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
             message.bot, settings.db_path, invoice_id
         )
         await _notify_admins_duplicate_invoice(message, settings, invoice_id, analysis)
-        try:
-            await progress.edit_text(
-                "✅ <b>Накладная распознана</b>\n\n"
-                "Проверьте краткий результат ниже. Администратор сможет принять данные "
-                "или исправить позиции перед начислением."
+        await progress.edit_text(
+            render_invoice_message(
+                analysis,
+                invoice_id=invoice_id,
+                footer=(
+                    "🟡 <b>СТАТУС · НА ПРОВЕРКЕ</b>\n"
+                    "Документ сохранён и отправлен администратору. После решения придёт уведомление 🔔"
+                ),
             )
-        except Exception:
-            pass
-
-        await message.answer(analysis_header(analysis, invoice_id=invoice_id))
-        for chunk in split_item_messages(analysis):
-            await message.answer(chunk)
-        await message.answer(
-            "🟡 <b>Отправлено администратору на проверку</b>\n\n"
-            "После решения вы получите уведомление 🔔",
-            reply_markup=user_main_kb(),
         )
     except InvoiceRecognitionError as exc:
         try:
@@ -332,7 +327,6 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
                 "⚠️ <b>Автоматически распознать накладную не удалось</b>\n\n"
                 f"{html.escape(str(exc))}\n\n"
                 "Файл сохранён и отправлен администратору. Он сможет запустить распознавание повторно.",
-                reply_markup=user_main_kb(),
             )
         except Exception:
             await message.answer(

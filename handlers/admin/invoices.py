@@ -22,13 +22,12 @@ from db.invoices import (
 )
 from services.invoice_recognition import InvoiceRecognitionError
 from services.invoice_workflow import (
-    analysis_header,
     analyze_invoice_from_telegram,
     deal_amount_from_analysis,
     edit_template,
     money,
-    split_item_messages,
 )
+from services.invoice_format import render_invoice_message
 
 
 router = Router()
@@ -149,21 +148,27 @@ def _review_kb(invoice_id: int) -> InlineKeyboardBuilder:
 
 
 async def _show_review(message: Message, invoice_id: int, analysis: dict) -> None:
-    await message.answer(analysis_header(analysis, invoice_id=invoice_id, include_duplicate_details=True))
-    for chunk in split_item_messages(analysis):
-        await message.answer(chunk)
     await message.answer(
-        "🔍 <b>Проверьте распознанные данные</b>\n\n"
-        "Если всё совпадает с накладной — подтвердите. "
-        "При необходимости можно исправить список товаров или запустить распознавание ещё раз.",
+        render_invoice_message(
+            analysis,
+            invoice_id=invoice_id,
+            include_duplicate_details=True,
+            footer=(
+                "🔍 <b>ПРОВЕРКА АДМИНИСТРАТОРА</b>\n"
+                "Сверьте данные с файлом. Можно подтвердить, исправить позиции или распознать заново."
+            ),
+        ),
         reply_markup=_review_kb(invoice_id).as_markup(),
     )
 
 
 async def _recognize_and_show(message: Message, settings: Settings, invoice_id: int) -> None:
     progress = await message.answer(
-        "🔎 <b>Распознаю накладную…</b>\n\n"
-        "Проверяю все страницы, товары, количество, цены и итог. Это может занять до минуты."
+        "⏳ <b>РАСПОЗНАЮ НАКЛАДНУЮ…</b>\n\n"
+        "🔎 Проверяю все страницы\n"
+        "📦 Читаю товары, количество и цены\n"
+        "💳 Сверяю итог к оплате\n\n"
+        "Это может занять до минуты."
     )
     try:
         analysis = await analyze_invoice_from_telegram(message.bot, settings.db_path, invoice_id)
@@ -179,11 +184,18 @@ async def _recognize_and_show(message: Message, settings: Settings, invoice_id: 
             await message.answer(f"⚠️ {html.escape(str(exc))}")
         return
 
-    try:
-        await progress.edit_text("✅ <b>Документ распознан. Проверьте результат ниже.</b>")
-    except Exception:
-        pass
-    await _show_review(message, invoice_id, analysis)
+    await progress.edit_text(
+        render_invoice_message(
+            analysis,
+            invoice_id=invoice_id,
+            include_duplicate_details=True,
+            footer=(
+                "🔍 <b>ПРОВЕРКА АДМИНИСТРАТОРА</b>\n"
+                "Сверьте данные с файлом. Можно подтвердить, исправить позиции или распознать заново."
+            ),
+        ),
+        reply_markup=_review_kb(invoice_id).as_markup(),
+    )
 
 
 @router.callback_query(F.data.startswith("ainv:approve:"))
