@@ -28,9 +28,13 @@ from services.invoice_workflow import (
     money,
 )
 from services.invoice_format import render_invoice_message
+from services.invoice_editor import revision
+from filters.admin import IsAdmin
 
 
 router = Router()
+router.message.filter(IsAdmin())
+router.callback_query.filter(IsAdmin())
 
 
 class AdminInvoice(StatesGroup):
@@ -140,26 +144,16 @@ async def _send_invoice_to_user(message: Message, inv: dict, caption: str, reply
 def _review_kb(invoice_id: int) -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Данные верны", callback_data=f"ainv:confirm:{invoice_id}")
-    kb.button(text="✏️ Исправить позиции", callback_data=f"ainv:edit:{invoice_id}")
+    kb.button(text="📦 Товары и реквизиты", callback_data=f"ainv:edit:{invoice_id}")
     kb.button(text="🔄 Распознать заново", callback_data=f"ainv:retry:{invoice_id}")
     kb.button(text="❌ Отклонить", callback_data=f"ainv:reject:{invoice_id}")
     kb.adjust(1, 1, 2)
     return kb
 
 
-async def _show_review(message: Message, invoice_id: int, analysis: dict) -> None:
-    await message.answer(
-        render_invoice_message(
-            analysis,
-            invoice_id=invoice_id,
-            include_duplicate_details=True,
-            footer=(
-                "🔍 <b>ПРОВЕРКА АДМИНИСТРАТОРА</b>\n"
-                "Сверьте данные с файлом. Можно подтвердить, исправить позиции или распознать заново."
-            ),
-        ),
-        reply_markup=_review_kb(invoice_id).as_markup(),
-    )
+async def _show_review(message: Message, invoice_id: int, analysis: dict, settings: Settings) -> None:
+    from handlers.admin.invoice_editor import send_overview
+    await send_overview(message, settings, invoice_id)
 
 
 async def _recognize_and_show(message: Message, settings: Settings, invoice_id: int) -> None:
@@ -184,18 +178,8 @@ async def _recognize_and_show(message: Message, settings: Settings, invoice_id: 
             await message.answer(f"⚠️ {html.escape(str(exc))}")
         return
 
-    await progress.edit_text(
-        render_invoice_message(
-            analysis,
-            invoice_id=invoice_id,
-            include_duplicate_details=True,
-            footer=(
-                "🔍 <b>ПРОВЕРКА АДМИНИСТРАТОРА</b>\n"
-                "Сверьте данные с файлом. Можно подтвердить, исправить позиции или распознать заново."
-            ),
-        ),
-        reply_markup=_review_kb(invoice_id).as_markup(),
-    )
+    from handlers.admin.invoice_editor import send_overview
+    await send_overview(progress, settings, invoice_id, edit=True)
 
 
 @router.callback_query(F.data.startswith("ainv:approve:"))
@@ -214,7 +198,7 @@ async def admin_invoice_approve(cbq: CallbackQuery, state: FSMContext, settings:
     await state.clear()
     analysis = decode_invoice_analysis(inv)
     if str(inv.get("analysis_status") or "") == "completed" and analysis and analysis.get("items"):
-        await _show_review(cbq.message, invoice_id, analysis)
+        await _show_review(cbq.message, invoice_id, analysis, settings)
         return
     if str(inv.get("analysis_status") or "") == "processing":
         await cbq.message.answer(
@@ -233,9 +217,18 @@ async def admin_invoice_retry(cbq: CallbackQuery, state: FSMContext, settings: S
     if not await get_invoice_full(settings.db_path, invoice_id):
         await cbq.answer("Не найдено", show_alert=True)
         return
-    await cbq.answer("Запускаю распознавание")
+    await cbq.answer()
     await state.clear()
-    await _recognize_and_show(cbq.message, settings, invoice_id)
+    from handlers.admin.invoice_editor import cb, button
+    from aiogram.types import InlineKeyboardMarkup
+    inv = await get_invoice_full(settings.db_path, invoice_id)
+    if inv.get('status') == 'approved' or inv.get('analysis_status') == 'processing':
+        await cbq.message.answer('Сначала верните принятую накладную на проверку или дождитесь текущего распознавания.')
+        return
+    await cbq.message.answer('Распознать оригинал заново? Ручные изменения будут заменены.',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [button('Распознать заново', cb('retryok', inv), 'danger')],
+            [button('Отмена', cb('page', inv))]]))
 
 
 @router.callback_query(F.data.startswith("ainv:confirm:"))
@@ -248,7 +241,7 @@ async def admin_invoice_confirm(cbq: CallbackQuery, state: FSMContext, settings:
     inv = await get_invoice_full(settings.db_path, invoice_id)
     analysis = decode_invoice_analysis(inv)
     items = list((analysis or {}).get("items") or [])
-    if not inv or not items:
+    if not inv or not items or inv.get("analysis_status") == "processing":
         await cbq.answer("Сначала распознайте позиции", show_alert=True)
         return
 
@@ -258,7 +251,7 @@ async def admin_invoice_confirm(cbq: CallbackQuery, state: FSMContext, settings:
     await cbq.answer()
     await state.clear()
     await state.set_state(AdminInvoice.waiting_reward_percent)
-    await state.update_data(invoice_id=invoice_id, deal_amount=deal_amount, items=items)
+    await state.update_data(invoice_id=invoice_id, deal_amount=deal_amount, items=items, invoice_revision=revision(inv))
 
     kb = InlineKeyboardBuilder()
     kb.button(text="❌ Отмена", callback_data="ainv:cancel")
@@ -287,36 +280,9 @@ async def admin_invoice_edit(cbq: CallbackQuery, state: FSMContext, settings: Se
         await cbq.answer("Не найдено", show_alert=True)
         return
 
-    analysis = decode_invoice_analysis(inv) or {"items": []}
-    template = edit_template(analysis)
-
-    await cbq.answer()
     await state.clear()
-    await state.set_state(AdminInvoice.waiting_items)
-    await state.update_data(invoice_id=invoice_id)
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="❌ Отмена", callback_data="ainv:cancel")
-    kb.adjust(1)
-
-    await cbq.message.answer(
-        "✏️ <b>Редактирование распознанных позиций</b>\n\n"
-        "Отправьте исправленный список. Каждая позиция — с новой строки:\n"
-        "<code>Название | количество | цена за единицу</code>\n\n"
-        "Итог будет пересчитан автоматически. Можно изменить только ошибочные строки, "
-        "но в ответе должен остаться полный список товаров.",
-        reply_markup=kb.as_markup(),
-    )
-
-    if template:
-        escaped = html.escape(template)
-        if len(escaped) <= 3400:
-            await cbq.message.answer(f"<b>Текущие данные для копирования:</b>\n\n<code>{escaped}</code>")
-        else:
-            await cbq.message.answer_document(
-                BufferedInputFile(template.encode("utf-8"), filename=f"invoice_{invoice_id}_positions.txt"),
-                caption="📄 Текущий список позиций. Скопируйте, исправьте и отправьте текстом в чат.",
-            )
+    from handlers.admin.invoice_editor import send_overview
+    await send_overview(cbq.message, settings, invoice_id)
 
 
 @router.callback_query(F.data.startswith("ainv:reject:"))
@@ -429,7 +395,7 @@ async def admin_invoice_items_input(message: Message, state: FSMContext, setting
         f"📦 Позиций: <b>{len(items)}</b>\n"
         f"💰 Новый итог: <b>{_money(deal_amount)}</b> ₽"
     )
-    await _show_review(message, invoice_id, analysis)
+    await _show_review(message, invoice_id, analysis, settings)
 
 
 @router.message(AdminInvoice.waiting_reward_percent)
@@ -448,13 +414,17 @@ async def admin_reward_percent_input(message: Message, state: FSMContext, settin
         return
 
     reward = _calc_reward(deal_amount, reward_percent)
-    await approve_invoice(
-        settings.db_path,
-        invoice_id,
-        deal_amount=deal_amount,
-        reward_amount=reward,
-        items=items,
-    )
+    try:
+        await approve_invoice(
+            settings.db_path, invoice_id, deal_amount=deal_amount,
+            reward_amount=reward, items=items, expected_revision=data.get('invoice_revision', 'stale'),
+        )
+    except ValueError as exc:
+        await state.clear()
+        await message.answer(html.escape(str(exc)))
+        from handlers.admin.invoice_editor import send_overview
+        await send_overview(message, settings, invoice_id)
+        return
     inv = await get_invoice_full(settings.db_path, invoice_id)
     await state.clear()
 

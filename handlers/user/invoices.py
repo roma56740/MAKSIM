@@ -311,6 +311,8 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
             message.bot, settings.db_path, invoice_id
         )
         await _notify_admins_duplicate_invoice(message, settings, invoice_id, analysis)
+        await _notify_admins_recognized(message, settings, invoice_id)
+        from handlers.admin.invoice_editor import overview
         await progress.edit_text(
             render_invoice_message(
                 analysis,
@@ -319,7 +321,9 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
                     "🟡 <b>СТАТУС · НА ПРОВЕРКЕ</b>\n"
                     "Документ сохранён и отправлен администратору. После решения придёт уведомление 🔔"
                 ),
-            )
+            ),
+            reply_markup=overview(
+                await get_invoice_full(settings.db_path, invoice_id), analysis, admin=False)[1],
         )
     except InvoiceRecognitionError as exc:
         try:
@@ -392,26 +396,13 @@ async def invoice_open_file(cbq: CallbackQuery, settings: Settings) -> None:
 
     caption = f"📎 Накладная <b>#{invoice_id}</b> • {_status_badge(inv.get('status', 'pending'))}"
 
-    items = await list_invoice_items(settings.db_path, invoice_id)
-    if items:
-        caption += "\n\n📦 <b>Товары:</b>"
-        for item in items[:6]:
-            qty = f"{float(item['quantity']):g}"
-            price = f"{float(item['unit_price']):,.2f}".replace(",", " ").replace(".", ",")
-            total = f"{float(item['line_total']):,.2f}".replace(",", " ").replace(".", ",")
-            product_name = str(item["product_name"])
-            if len(product_name) > 45:
-                product_name = product_name[:42] + "…"
-            caption += f"\n• {html.escape(product_name)} — {qty} × {price} ₽ = <b>{total} ₽</b>"
-        if len(items) > 6:
-            caption += f"\n… ещё {len(items) - 6} позиций"
-
-    kb = None
+    from handlers.admin.invoice_editor import cb
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📦 Товары и реквизиты", callback_data=cb('page', inv))
     if inv.get("status") == "approved":
-        builder = InlineKeyboardBuilder()
         builder.button(text="✍️ Попросить пересчёт", callback_data=f"uinv:recheck:{invoice_id}")
-        builder.adjust(1)
-        kb = builder.as_markup()
+    builder.adjust(1)
+    kb = builder.as_markup()
 
     if (inv.get("file_kind") or "").lower() == "photo":
         await cbq.message.answer_photo(inv["file_id"], caption=caption, reply_markup=kb)
@@ -476,3 +467,16 @@ async def invoice_recheck_comment(message: Message, state: FSMContext, settings:
     )
 
     await _notify_admins_new_invoice(message, settings, invoice_id)
+
+
+async def _notify_admins_recognized(message: Message, settings: Settings, invoice_id: int) -> None:
+    """Send the completed card, so admins don't have to reopen a processing notification."""
+    import logging
+    from handlers.admin.invoice_editor import send_overview
+    recipients = set(settings.admin_ids)
+    recipients.update(int(x) for x in await list_db_admin_ids(settings.db_path))
+    for admin_id in recipients:
+        try:
+            await send_overview(message, settings, invoice_id, chat_id=admin_id)
+        except Exception:
+            logging.getLogger(__name__).warning("Could not deliver recognized invoice %s to admin %s", invoice_id, admin_id)

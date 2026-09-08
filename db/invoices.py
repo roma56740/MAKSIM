@@ -183,14 +183,17 @@ async def create_invoice(
 async def mark_invoice_analysis_processing(db_path: str, invoice_id: int) -> None:
     now = _utcnow()
     async with aiosqlite.connect(db_path) as db:
-        await db.execute(
+        cur = await db.execute(
             """
             UPDATE invoices
             SET analysis_status='processing', analysis_error=NULL, updated_at=?
-            WHERE id=?
+            WHERE id=? AND analysis_status <> 'processing' AND status <> 'approved' 
             """,
             (now, invoice_id),
         )
+        if cur.rowcount != 1:
+            from services.invoice_recognition import InvoiceRecognitionError
+            raise InvoiceRecognitionError("Накладная уже обрабатывается или принята. Для повторного распознавания верните её на проверку.")
         await db.commit()
 
 
@@ -198,6 +201,8 @@ async def save_invoice_analysis(
     db_path: str,
     invoice_id: int,
     analysis: dict[str, Any],
+    *,
+    expected_revision: str | None = None,
 ) -> None:
     now = _utcnow()
     identity = invoice_identity(analysis)
@@ -206,6 +211,15 @@ async def save_invoice_analysis(
     payload = json.dumps(analysis, ensure_ascii=False, separators=(",", ":"))
     duplicate_payload = json.dumps(duplicates, ensure_ascii=False, separators=(",", ":")) if duplicates else None
     async with aiosqlite.connect(db_path) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        db.row_factory = aiosqlite.Row
+        current = await (await db.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,))).fetchone()
+        if not current:
+            raise ValueError("Накладная не найдена.")
+        if expected_revision is not None:
+            from services.invoice_editor import revision
+            if revision(dict(current)) != expected_revision or current['analysis_status'] == 'processing':
+                raise ValueError("Данные уже изменены. Откройте накладную заново.")
         await db.execute(
             """
             UPDATE invoices
@@ -231,6 +245,19 @@ async def save_invoice_analysis(
                 invoice_id,
             ),
         )
+        if expected_revision is not None and current['status'] == 'approved':
+            # Keep the previously approved reward rate and accounting rows consistent.
+            from services.invoice_workflow import deal_amount_from_analysis
+            total = deal_amount_from_analysis(analysis)
+            old_total = float(current['deal_amount'] or 0)
+            rate = float(current['reward_amount'] or 0) / old_total if old_total else 0
+            await db.execute("DELETE FROM invoice_items WHERE invoice_id=?", (invoice_id,))
+            for item in analysis.get('items') or []:
+                await db.execute(
+                    "INSERT INTO invoice_items (invoice_id, product_name, product_key, quantity, unit_price, line_total, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (invoice_id, item['product_name'], _product_key(item['product_name']), item['quantity'], item['unit_price'], item['line_total'], now))
+            await db.execute("UPDATE invoices SET deal_amount=?, reward_amount=? WHERE id=?",
+                             (total, round(total * rate, 2), invoice_id))
         await db.commit()
 
 
@@ -365,10 +392,18 @@ async def approve_invoice(
     deal_amount: float,
     reward_amount: float,
     items: list[dict[str, Any]] | None = None,
+    *, expected_revision: str | None = None,
 ) -> None:
     now = _utcnow()
     async with aiosqlite.connect(db_path) as db:
         await db.execute("PRAGMA foreign_keys = ON;")
+        await db.execute("BEGIN IMMEDIATE")
+        if expected_revision is not None:
+            from services.invoice_editor import revision
+            db.row_factory = aiosqlite.Row
+            current = await (await db.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,))).fetchone()
+            if not current or revision(dict(current)) != expected_revision:
+                raise ValueError("Данные изменены другим администратором. Проверьте накладную заново.")
         await db.execute("DELETE FROM invoice_items WHERE invoice_id = ?", (invoice_id,))
         for item in items or []:
             quantity = float(item["quantity"])

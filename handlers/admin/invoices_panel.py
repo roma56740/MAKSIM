@@ -4,6 +4,7 @@ import html
 import math
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -106,7 +107,7 @@ def _panel_text(
 
         block = (
             f"{_status_badge(it.get('status', status))} <b>#{inv_id}</b>\n"
-            f"👤 {html.escape(str(user_name))}\n"
+            f"👤 {html.escape(str(user_name)[:80])}\n"
             f"📱 {html.escape(str(phone))}\n"
             f"🕒 {created}\n"
             f"{_analysis_badge(it)}"
@@ -120,10 +121,10 @@ def _panel_text(
             )
 
         if status == "rejected":
-            block += f"\n🧾 Причина: <b>{it.get('reason') or '—'}</b>"
+            block += f"\n🧾 Причина: <b>{html.escape(str(it.get('reason') or '—')[:120])}</b>"
 
         if comment:
-            block += f"\n🔁 Повторная проверка\n💬 {html.escape(comment)}"
+            block += f"\n🔁 Повторная проверка\n💬 {html.escape(comment[:120])}"
 
         lines.append(block)
 
@@ -148,27 +149,11 @@ def _panel_kb(status: str, page: int, total_pages: int, items: list[dict]) -> In
         ),
     )
 
+    from handlers.admin.invoice_editor import cb
     for it in items:
-        inv_id = it["id"]
-
-        if status == "pending":
-            kb.row(
-                InlineKeyboardButton(text=f"📎 Открыть #{inv_id}", callback_data=f"ainv:open:{inv_id}"),
-                InlineKeyboardButton(text=f"🔎 Проверить #{inv_id}", callback_data=f"ainv:approve:{inv_id}"),
-                InlineKeyboardButton(text=f"❌ Отклонить #{inv_id}", callback_data=f"ainv:reject:{inv_id}"),
-            )
-        elif status == "approved":
-            kb.row(
-                InlineKeyboardButton(text=f"📎 Открыть #{inv_id}", callback_data=f"ainv:open:{inv_id}"),
-                InlineKeyboardButton(text=f"🟡 На проверку #{inv_id}", callback_data=f"ainv:pending:{inv_id}"),
-                InlineKeyboardButton(text=f"❌ Отклонить #{inv_id}", callback_data=f"ainv:reject:{inv_id}"),
-            )
-        else:
-            kb.row(
-                InlineKeyboardButton(text=f"📎 Открыть #{inv_id}", callback_data=f"ainv:open:{inv_id}"),
-                InlineKeyboardButton(text=f"✅ Принять #{inv_id}", callback_data=f"ainv:approve:{inv_id}"),
-                InlineKeyboardButton(text=f"🟡 На проверку #{inv_id}", callback_data=f"ainv:pending:{inv_id}"),
-            )
+        company = str(it.get('company_name') or it.get('user_full_name') or 'Накладная')[:28]
+        kb.row(InlineKeyboardButton(text=f"#{it['id']} · {company} · {_money(it.get('document_total'))}",
+                                    callback_data=cb('page', it), style='primary'))
 
     nav_buttons = []
     if page > 0:
@@ -211,21 +196,23 @@ async def _ensure_admin(tg_id: int, settings: Settings) -> bool:
     return await is_admin(settings.db_path, tg_id, settings.admin_ids)
 
 
-@router.message(F.text == "🧾 Накладные")
-async def admin_invoices_panel(message: Message, settings: Settings) -> None:
+@router.message(F.text.in_({"🧾 Накладные", "🧾 Управление накладными"}))
+async def admin_invoices_panel(message: Message, settings: Settings, state: FSMContext) -> None:
     if not await _ensure_admin(message.from_user.id, settings):
         return
 
+    await state.clear()
     await _send_panel(message, settings, status="pending", page=0)
 
 
 @router.callback_query(F.data.startswith("ainv:panel:"))
-async def admin_invoices_panel_page(cbq: CallbackQuery, settings: Settings) -> None:
+async def admin_invoices_panel_page(cbq: CallbackQuery, settings: Settings, state: FSMContext) -> None:
     if not await _ensure_admin(cbq.from_user.id, settings):
         await cbq.answer("Нет доступа", show_alert=True)
         return
 
     await cbq.answer()
+    await state.clear()
     _, _, status, page_s = cbq.data.split(":", 3)
     page = int(page_s)
     await _edit_panel(cbq, settings, status=status, page=page)
@@ -244,54 +231,14 @@ async def admin_open_invoice_file(cbq: CallbackQuery, settings: Settings) -> Non
         await cbq.message.answer("⚠️ Накладная не найдена.")
         return
 
-    status = inv.get("status", "pending")
-
-    caption = (
-        f"📎 <b>Накладная #{invoice_id}</b>\n"
-        f"{_status_badge(status)}\n\n"
-        f"👤 <b>{html.escape(str(inv.get('user_full_name') or '—'))}</b>\n"
-        f"📱 <b>{html.escape(str(inv.get('user_phone') or '—'))}</b>\n"
-        f"🕒 {inv.get('created_at') or '—'}\n"
-        f"{_analysis_badge(inv)}"
-    )
-
-    if status == "approved":
-        caption += (
-            f"\n💰 Продажи: <b>{_money(inv.get('deal_amount'))}</b> ₽"
-            f"\n📈 Процент: <b>{_percent(inv.get('deal_amount'), inv.get('reward_amount'))}</b>%"
-            f"\n🎁 Вознаграждение: <b>{_money(inv.get('reward_amount'))}</b> ₽"
-        )
-
-    if status == "approved":
-        invoice_items = await list_invoice_items(settings.db_path, invoice_id)
-        if invoice_items:
-            caption += "\n\n📦 <b>Товары:</b>"
-            for item in invoice_items[:6]:
-                qty = f"{float(item['quantity']):g}"
-                product_name = str(item["product_name"])
-                if len(product_name) > 45:
-                    product_name = product_name[:42] + "…"
-                caption += (
-                    f"\n• {html.escape(product_name)} — "
-                    f"{qty} × {_money(item['unit_price'])} ₽ = "
-                    f"<b>{_money(item['line_total'])} ₽</b>"
-                )
-            if len(invoice_items) > 6:
-                caption += f"\n… ещё {len(invoice_items) - 6} позиций"
-
-    if status == "rejected":
-        caption += f"\n🧾 Причина: <b>{inv.get('reason') or '—'}</b>"
-
-    comment = (inv.get("comment") or "").strip()
-    if comment:
-        caption += f"\n\n🔁 <b>Комментарий менеджера:</b>\n{html.escape(comment)}"
-
-    reply_markup = _detail_kb(invoice_id, status).as_markup()
-
+    from handlers.admin.invoice_editor import cb
+    caption = f"📎 <b>Оригинал накладной #{invoice_id}</b>"
+    reply_markup = InlineKeyboardBuilder()
+    reply_markup.button(text="‹ Карточка и товары", callback_data=cb('page', inv))
     if (inv.get("file_kind") or "").lower() == "photo":
-        await cbq.message.answer_photo(inv["file_id"], caption=caption, reply_markup=reply_markup)
+        await cbq.message.answer_photo(inv["file_id"], caption=caption, reply_markup=reply_markup.as_markup())
     else:
-        await cbq.message.answer_document(inv["file_id"], caption=caption, reply_markup=reply_markup)
+        await cbq.message.answer_document(inv["file_id"], caption=caption, reply_markup=reply_markup.as_markup())
 
 
 async def _send_panel(message: Message, settings: Settings, status: str, page: int) -> None:
