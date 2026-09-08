@@ -12,7 +12,7 @@ from db.invoices import decode_invoice_analysis, get_invoice_full
 from db.invoices_admin import count_invoices_by_status, list_invoices_by_status
 from filters.admin import IsAdmin
 from services.invoice_workflow import money
-from services.telegram_invoice_ui import display, rich_button
+from services.telegram_invoice_ui import display, rich_button, cell_text
 
 router = Router()
 router.message.filter(IsAdmin())
@@ -40,17 +40,17 @@ def panel_view(status, items, page, total_pages, total, counts):
     from handlers.admin.invoice_editor import cb
     title = f"🧾 <b>Накладные</b> · {STATUSES[status]}"
     text = [title, f"Всего: {total} · Страница {page+1} из {total_pages}"]
-    rich = ['<h2>Накладные</h2>', '<p>Выберите статус, затем откройте документ в таблице.</p>', '<tg-button-row>']
+    rich = ['<h2>Накладные</h2>', '<p>Выберите статус, затем откройте документ в таблице.</p>']
     rows = [[]]
     for key, label in STATUSES.items():
         label = f"{ICONS[key]} {label} · {counts[key]}"
         data = f'ainv:panel:{key}:0'
         style = 'success' if key == status else 'primary'
-        rich.append(rich_button(label, data, style))
+        rich.append('<tg-button-row>'+rich_button(label, data, style)+'</tg-button-row>')
         rows[0].append(InlineKeyboardButton(text=label, callback_data=data, style=style))
-    rich += ['</tg-button-row>', f'<p><b>{STATUSES[status]}</b> · {total} документов · {page+1}/{total_pages}</p>']
+    rich += [f'<p><b>{STATUSES[status]}</b> · {total} документов · {page+1}/{total_pages}</p>']
     if items:
-        rich.append('<table bordered striped compact><tr><th>Документ / компания</th><th align="right">К оплате</th><th>Открыть</th></tr>')
+        rich.append('<table bordered striped compact><tr><th>Документ / компания</th><th align="right">К оплате</th></tr>')
         for inv in items:
             a = decode_invoice_analysis(inv) or {}
             ident = inv['id']
@@ -62,9 +62,9 @@ def panel_view(status, items, page, total_pages, total, counts):
             label = f"#{ident}" + (f" · № {str(number)[:50]}" if number else '')
             state = _analysis_label(inv)
             data = cb('page', inv)
-            rich.append(f'<tr><td><b>{_esc(label, 90)}</b><br>{_esc(company, 140)}<br><i>{_esc(date, 20)} · {_esc(state, 80)}</i></td>'
-                        f'<td align="right"><b>{money(amount).replace(" ", chr(160))}</b><br><i>{_esc(currency, 3)}</i></td>'
-                        f'<td>{rich_button("Открыть ↗", data)}</td></tr>')
+            rich.append(f'<tr><td valign="top"><b>{cell_text(label, 90)}</b><br>{cell_text(company, 140)}<br><i>{cell_text(date, 20)}<br>{cell_text(state, 80)}</i></td>'
+                        f'<td valign="top" align="right"><b>{cell_text(money(amount))}</b><br><i>{_esc(currency, 3)}</i></td></tr>'
+                        f'<tr><td colspan="2" align="center">{rich_button("Открыть", data)}</td></tr>')
             text.append(f"<b>{_esc(label, 90)}</b> · {_esc(company, 100)}\n{_esc(date, 20)} · {_esc(state, 80)}\n<b>{money(amount)} {_esc(currency, 3)}</b>")
             rows.append([InlineKeyboardButton(text=f'Открыть #{ident} · {str(company)[:35]}', callback_data=data)])
         rich.append('</table>')

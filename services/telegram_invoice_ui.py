@@ -25,6 +25,14 @@ class EditRichInvoice(TelegramMethod[Message | bool]):
     reply_markup: InlineKeyboardMarkup | None = None
 
 
+def cell_text(value, limit=500):
+    """Soft wrapping for long visible identifiers. Stored values/callbacks remain untouched."""
+    value = str(value if value is not None and value != '' else '—')[:limit]
+    value = value.replace('\u00a0', ' ').replace('\u202f', ' ')
+    value = re.sub(r'\S{13,}', lambda m: '\u200b'.join(m[0][i:i+12] for i in range(0, len(m[0]), 12)), value)
+    return html.escape(value)
+
+
 def rich_button(label, data, style='primary'):
     """Escape both visible text and callback attributes; no arbitrary HTML values."""
     if style not in {'primary', 'success', 'danger', 'link'}:
@@ -55,7 +63,7 @@ def embed_controls(rich, keyboard):
             elif item.url:
                 buttons.append(f'<tg-button type="url" url="{html.escape(item.url, quote=True)}">{html.escape(item.text)}</tg-button>')
         if buttons:
-            rich += '<tg-button-row>' + ''.join(buttons) + '</tg-button-row>'
+            rich += ''.join('<tg-button-row>'+b+'</tg-button-row>' for b in buttons)
     return rich
 
 

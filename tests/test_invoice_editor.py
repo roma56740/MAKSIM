@@ -45,6 +45,38 @@ class RulesTests(unittest.TestCase):
         self.assertEqual(updated['items'][0]['unit_price'], 50)
         self.assertEqual(updated['items'][0]['discount_amount'], 150)
 
+    def test_mobile_tables_have_two_columns_and_full_row_actions(self):
+        import json
+        from html.parser import HTMLParser
+        from services.telegram_invoice_ui import cell_text, embed_controls
+        from handlers.admin.invoices_panel import panel_view
+        class Layout(HTMLParser):
+            def __init__(self):
+                super().__init__(); self.width=0; self.widths=[]; self.cell={}; self.action_spans=[]
+            def handle_starttag(self,tag,attrs):
+                attrs=dict(attrs)
+                if tag=='tr': self.width=0
+                if tag in {'td','th'}:
+                    self.width+=int(attrs.get('colspan',1)); self.cell=attrs
+                if tag=='tg-button' and self.cell:
+                    self.action_spans.append(int(self.cell.get('colspan',1)))
+            def handle_endtag(self,tag):
+                if tag=='tr': self.widths.append(self.width)
+                if tag in {'td','th'}: self.cell={}
+        a=analysis()
+        inv={'id':123, 'status':'pending', 'analysis_status':'completed', 'analysis_json':json.dumps(a), 'document_total':5149200}
+        _,kb,rich=overview(inv,a)
+        _,panel_kb,panel=panel_view('pending',[inv],0,1,1,{'pending':1,'approved':0,'rejected':0})
+        for content in (embed_controls(rich,kb),embed_controls(panel,panel_kb)):
+            parser=Layout(); parser.feed(content)
+            self.assertTrue(all(n<=2 for n in parser.widths))
+            self.assertTrue(all(n==2 for n in parser.action_spans))
+            self.assertNotIn('\u00a0',content)
+        raw='A'*80+'<&'
+        wrapped=cell_text(raw)
+        self.assertIn('\u200b',wrapped)
+        self.assertIn('&lt;&amp;',wrapped)
+
     def test_large_invoice_navigation_and_escaping(self):
         a = analysis(); a['items'] *= 150
         inv={'id': 123, 'status':'pending', 'analysis_json':'{}', 'analysis_status':'completed'}

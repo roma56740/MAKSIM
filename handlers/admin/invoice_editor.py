@@ -10,7 +10,7 @@ from db import is_admin
 from db.invoices import get_invoice_full, decode_invoice_analysis, save_invoice_analysis, list_invoice_items
 from services.invoice_editor import HEADER_FIELDS, ITEM_FIELDS, NUMBERS, revision, parse_value, apply_change, recalculate
 from services.invoice_workflow import money, quantity, deal_amount_from_analysis
-from services.telegram_invoice_ui import display, rich_button, rich_text
+from services.telegram_invoice_ui import display, rich_button, rich_text, cell_text
 
 router = Router()
 PAGE = 6
@@ -69,7 +69,7 @@ def overview(inv, analysis, *, admin=True, page=0):
     lines.append(f"\n<b>Товары · {page+1}/{pages}</b>\nНажмите на товар, чтобы {'посмотреть и изменить данные' if admin else 'посмотреть подробности'}.")
     rows = []
     currency = esc(analysis.get('currency') or 'RUB', 3)
-    payable = money(deal_amount_from_analysis(analysis)).replace(' ', '\u00a0')
+    payable = money(deal_amount_from_analysis(analysis))
     rich = (f"<h2>Накладная #{inv['id']}</h2><p><b>{esc(analysis.get('supplier'), 180)}</b><br>{status}</p>"
             '<table bordered striped compact><tr><th>К оплате</th><th>Товаров</th></tr>'
             f'<tr><td><b>{payable} {currency}</b></td><td><b>{len(items)}</b></td></tr></table>')
@@ -93,27 +93,28 @@ def overview(inv, analysis, *, admin=True, page=0):
         if inv.get('status') == 'approved':
             info += [('Вознаграждение', money(inv.get('reward_amount')))]
     rich += '<details><summary>Реквизиты и результаты проверки</summary><table bordered striped compact>'
-    rich += ''.join(f'<tr><td>{label}</td><td>{esc(value, 350)}</td></tr>' for label, value in info if value is not None)
+    rich += ''.join(f'<tr><td>{label}</td><td>{cell_text(value, 350)}</td></tr>' for label, value in info if value is not None)
     rich += '</table>'
     if warnings:
         rich += '<p>' + '<br>'.join(esc(w, 250) for w in warnings[:6]) + '</p>'
     rich += '</details>'
     rich += f'<h3>Товары · {page+1}/{pages}</h3><p>Откройте товар кнопкой внутри строки.</p>'
-    table = ['<table bordered striped compact><tr><th>Товар</th><th align="right">Кол-во × цена</th><th align="right">Сумма</th></tr>']
+    table = ['<table bordered striped compact>']
     for i in range(page*PAGE, min((page+1)*PAGE, len(items))):
         item = items[i]
         name = str(item.get('product_name') or 'Без названия')
         data = cb('item', inv, page, i)
         rows.append([button(f"{i+1}. {name[:38]} · {money(item.get('line_total'))}", data)])
         lines.append(f"\n<b>{i+1}. {esc(name, 90)}</b>\n{quantity(item.get('quantity'))} {esc(item.get('unit'), 10)} × {money(item.get('unit_price'))} = <b>{money(item.get('line_total'))}</b>")
-        item_action = rich_button('Изменить ↗' if admin else 'Подробнее ↗', data)
+        item_action = rich_button('Изменить' if admin else 'Подробнее', data)
         q = esc(quantity(item.get('quantity')), 24)
         unit = esc(item.get('unit') or 'шт', 12)
-        price = money(item.get('unit_price')).replace(' ', '\u00a0')
-        line_total = money(item.get('line_total')).replace(' ', '\u00a0')
-        table.append(f'<tr><td><b>{i+1}. {esc(name, 160)}</b><br>{item_action}</td>'
-                     f'<td align="right">{q} {unit}<br>× {price}</td>'
-                     f'<td align="right"><b>{line_total}</b></td></tr>')
+        price = money(item.get('unit_price'))
+        line_total = money(item.get('line_total'))
+        table.append(f'<tr><th colspan="2" align="left">{i+1}. {cell_text(name, 160)}</th></tr>'
+                     f'<tr><td>Количество<br>{q} {unit}<br>Цена<br>{price}</td>'
+                     f'<td align="right">Сумма<br><b>{line_total}</b></td></tr>'
+                     f'<tr><td colspan="2" align="center">{item_action}</td></tr>')
     table.append('</table>')
     rich += ''.join(table) if items else '<p>Пока нет товаров.</p>'
     nav = []
@@ -179,15 +180,14 @@ async def detail(message, inv, analysis, admin, *, index=-1, page=0, edit=True):
     lines = [title]
     rich = rich_text(title)
     rich += '<p>Нажмите «✎» возле поля, чтобы изменить значение.</p>' if admin else '<p>Данные товара из накладной.</p>'
-    rich += '<table bordered striped compact><tr><th>Поле</th><th>Значение</th>' + ('<th>Правка</th>' if admin else '') + '</tr>'
+    rich += '<table bordered striped compact><tr><th>Поле</th><th>Значение</th></tr>'
     for key in keys:
         lines.append(f"<b>{fields[key]}:</b> {esc(value_text(key, data.get(key)))}")
-        rich += f'<tr><td>{fields[key]}</td><td>{esc(value_text(key, data.get(key)))}</td>'
+        rich += f'<tr><td valign="top">{cell_text(fields[key])}</td><td>{cell_text(value_text(key, data.get(key)))}</td></tr>'
         if admin:
             field_action = cb('field', inv, page, index, list(fields).index(key))
             rows.append([button(f"✎ {fields[key]} · {value_text(key, data.get(key))[:32]}", field_action)])
-            rich += '<td>' + rich_button('✎', field_action) + '</td>'
-        rich += '</tr>'
+            rich += '<tr><td colspan="2" align="center">' + rich_button('✎ Изменить', field_action) + '</td></tr>'
     rich += '</table>'
     if admin and inv.get('status') == 'approved':
         rich += '<blockquote>Изменения обновят аналитику. Процент вознаграждения сохраняется.</blockquote>' 
