@@ -312,19 +312,8 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
         )
         await _notify_admins_duplicate_invoice(message, settings, invoice_id, analysis)
         await _notify_admins_recognized(message, settings, invoice_id)
-        from handlers.admin.invoice_editor import overview
-        await progress.edit_text(
-            render_invoice_message(
-                analysis,
-                invoice_id=invoice_id,
-                footer=(
-                    "🟡 <b>СТАТУС · НА ПРОВЕРКЕ</b>\n"
-                    "Документ сохранён и отправлен администратору. После решения придёт уведомление 🔔"
-                ),
-            ),
-            reply_markup=overview(
-                await get_invoice_full(settings.db_path, invoice_id), analysis, admin=False)[1],
-        )
+        from handlers.admin.invoice_editor import send_overview
+        await send_overview(progress, settings, invoice_id, actor=message.from_user.id, edit=True)
     except InvoiceRecognitionError as exc:
         try:
             await progress.edit_text(

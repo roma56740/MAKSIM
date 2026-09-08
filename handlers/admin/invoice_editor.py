@@ -10,7 +10,7 @@ from db import is_admin
 from db.invoices import get_invoice_full, decode_invoice_analysis, save_invoice_analysis, list_invoice_items
 from services.invoice_editor import HEADER_FIELDS, ITEM_FIELDS, NUMBERS, revision, parse_value, apply_change, recalculate
 from services.invoice_workflow import money, quantity, deal_amount_from_analysis
-from services.telegram_invoice_ui import display
+from services.telegram_invoice_ui import display, rich_button, rich_text
 
 router = Router()
 PAGE = 6
@@ -68,16 +68,52 @@ def overview(inv, analysis, *, admin=True, page=0):
         lines.append('<blockquote expandable>' + '\n'.join(esc(x, 140) for x in warnings[:3]) + '</blockquote>')
     lines.append(f"\n<b>Товары · {page+1}/{pages}</b>\nНажмите на товар, чтобы {'посмотреть и изменить данные' if admin else 'посмотреть подробности'}.")
     rows = []
-    rich = '<p>' + '<br>'.join(lines).replace('\n', '<br>') + '</p>'
-    rich = rich.replace('<blockquote expandable>', '</p><blockquote>').replace('</blockquote>', '</blockquote><p>')
-    table = ['<table><tr><th>Товар</th><th>Кол-во</th><th>Цена</th><th>Сумма</th></tr>']
+    currency = esc(analysis.get('currency') or 'RUB', 3)
+    payable = money(deal_amount_from_analysis(analysis)).replace(' ', '\u00a0')
+    rich = (f"<h2>Накладная #{inv['id']}</h2><p><b>{esc(analysis.get('supplier'), 180)}</b><br>{status}</p>"
+            '<table bordered striped compact><tr><th>К оплате</th><th>Товаров</th></tr>'
+            f'<tr><td><b>{payable} {currency}</b></td><td><b>{len(items)}</b></td></tr></table>')
+    if abs(difference) > 0.01:
+        rich += f'<blockquote>⚠ <b>Итог отличается от суммы товаров на {money(difference)}</b><br>Проверьте скидки и сумму к оплате.</blockquote>'
+    if inv.get('analysis_status') != 'completed':
+        rich += '<blockquote>' + {
+            'processing': '◷ Идёт распознавание. Обновите карточку позже.',
+            'failed': '⚠ Распознавание не завершено. Можно добавить товары вручную.',
+        }.get(inv.get('analysis_status'), '◷ Ожидает распознавания.') + '</blockquote>'
+    if analysis.get('duplicate_matches') and admin:
+        rich += f'<blockquote>⚠ Возможный повтор: <b>{esc(ids)}</b></blockquote>'
+    info = [
+        ('Номер', analysis.get('invoice_number')), ('Дата', analysis.get('invoice_date')),
+        ('Покупатель', analysis.get('buyer')), ('Сумма строк', money(analysis.get('calculated_total'))),
+        ('Общая скидка', money(analysis.get('discount_amount'))), ('НДС', money(analysis.get('vat_amount'))),
+    ]
+    if admin:
+        info += [('Отправитель', inv.get('user_full_name')), ('Телефон', inv.get('user_phone')),
+                 ('Комментарий', inv.get('comment')), ('Причина отклонения', inv.get('reason'))]
+        if inv.get('status') == 'approved':
+            info += [('Вознаграждение', money(inv.get('reward_amount')))]
+    rich += '<details><summary>Реквизиты и результаты проверки</summary><table bordered striped compact>'
+    rich += ''.join(f'<tr><td>{label}</td><td>{esc(value, 350)}</td></tr>' for label, value in info if value is not None)
+    rich += '</table>'
+    if warnings:
+        rich += '<p>' + '<br>'.join(esc(w, 250) for w in warnings[:6]) + '</p>'
+    rich += '</details>'
+    rich += f'<h3>Товары · {page+1}/{pages}</h3><p>Откройте товар кнопкой внутри строки.</p>'
+    table = ['<table bordered striped compact><tr><th>Товар</th><th align="right">Кол-во × цена</th><th align="right">Сумма</th></tr>']
     for i in range(page*PAGE, min((page+1)*PAGE, len(items))):
         item = items[i]
         name = str(item.get('product_name') or 'Без названия')
         data = cb('item', inv, page, i)
         rows.append([button(f"{i+1}. {name[:38]} · {money(item.get('line_total'))}", data)])
         lines.append(f"\n<b>{i+1}. {esc(name, 90)}</b>\n{quantity(item.get('quantity'))} {esc(item.get('unit'), 10)} × {money(item.get('unit_price'))} = <b>{money(item.get('line_total'))}</b>")
-        table.append(f'<tr><td><tg-button type="callback_data" style="link" data="{data}">{i+1}. {esc(name, 90)}</tg-button></td><td>{quantity(item.get("quantity"))}</td><td>{money(item.get("unit_price"))}</td><td>{money(item.get("line_total"))}</td></tr>')
+        item_action = rich_button('Изменить ↗' if admin else 'Подробнее ↗', data)
+        q = esc(quantity(item.get('quantity')), 24)
+        unit = esc(item.get('unit') or 'шт', 12)
+        price = money(item.get('unit_price')).replace(' ', '\u00a0')
+        line_total = money(item.get('line_total')).replace(' ', '\u00a0')
+        table.append(f'<tr><td><b>{i+1}. {esc(name, 160)}</b><br>{item_action}</td>'
+                     f'<td align="right">{q} {unit}<br>× {price}</td>'
+                     f'<td align="right"><b>{line_total}</b></td></tr>')
     table.append('</table>')
     rich += ''.join(table) if items else '<p>Пока нет товаров.</p>'
     nav = []
@@ -141,10 +177,20 @@ async def detail(message, inv, analysis, admin, *, index=-1, page=0, edit=True):
         keys = list(fields)
         pages = 1
     lines = [title]
+    rich = rich_text(title)
+    rich += '<p>Нажмите «✎» возле поля, чтобы изменить значение.</p>' if admin else '<p>Данные товара из накладной.</p>'
+    rich += '<table bordered striped compact><tr><th>Поле</th><th>Значение</th>' + ('<th>Правка</th>' if admin else '') + '</tr>'
     for key in keys:
         lines.append(f"<b>{fields[key]}:</b> {esc(value_text(key, data.get(key)))}")
+        rich += f'<tr><td>{fields[key]}</td><td>{esc(value_text(key, data.get(key)))}</td>'
         if admin:
-            rows.append([button(f"✎ {fields[key]} · {value_text(key, data.get(key))[:32]}", cb('field', inv, page, index, list(fields).index(key)))])
+            field_action = cb('field', inv, page, index, list(fields).index(key))
+            rows.append([button(f"✎ {fields[key]} · {value_text(key, data.get(key))[:32]}", field_action)])
+            rich += '<td>' + rich_button('✎', field_action) + '</td>'
+        rich += '</tr>'
+    rich += '</table>'
+    if admin and inv.get('status') == 'approved':
+        rich += '<blockquote>Изменения обновят аналитику. Процент вознаграждения сохраняется.</blockquote>' 
     if admin:
         lines.append('\nНажмите на поле и отправьте новое значение. Изменения сохраняются сразу.')
         if inv.get('status') == 'approved':
@@ -164,8 +210,7 @@ async def detail(message, inv, analysis, admin, *, index=-1, page=0, edit=True):
         if admin: rows.append([button('Удалить товар', cb('delete', inv, page, index), 'danger')])
     rows.append([button('‹ К товарам', cb('page', inv, page if index >= 0 else 0))])
     text = '\n\n'.join(lines)
-    # Ordinary HTML keeps all fields readable even with a pre-rich client/server.
-    await display(message, text, InlineKeyboardMarkup(inline_keyboard=rows), edit=edit)
+    await display(message, text, InlineKeyboardMarkup(inline_keyboard=rows), rich=rich, edit=edit)
 
 
 @router.callback_query(F.data.startswith('iv:'))
@@ -278,7 +323,7 @@ async def input_value(message: Message, state: FSMContext, settings: Settings):
                 step = 'quantity' if key == 'product_name' else 'unit_price'
                 await state.update_data(draft=draft, step=step)
                 kb = InlineKeyboardMarkup(inline_keyboard=[[button('Отмена', cb('page', inv, data['page']))]])
-                await message.answer('＋ <b>Новый товар · '+('шаг 2 из 3</b>\n\nВведите количество.' if step == 'quantity' else 'шаг 3 из 3</b>\n\nВведите цену за единицу после скидки.'), reply_markup=kb)
+                await display(message, '＋ <b>Новый товар · '+('шаг 2 из 3</b>\n\nВведите количество.' if step == 'quantity' else 'шаг 3 из 3</b>\n\nВведите цену за единицу после скидки.'), kb)
                 return
             draft.update(article=None, unit='шт', unit_price_before_discount=value, discount_percent=0, discount_amount=0)
             from services.invoice_editor import update_item

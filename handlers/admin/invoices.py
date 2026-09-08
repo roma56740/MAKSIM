@@ -30,6 +30,7 @@ from services.invoice_workflow import (
 from services.invoice_format import render_invoice_message
 from services.invoice_editor import revision
 from filters.admin import IsAdmin
+from services.telegram_invoice_ui import display
 
 
 router = Router()
@@ -225,8 +226,8 @@ async def admin_invoice_retry(cbq: CallbackQuery, state: FSMContext, settings: S
     if inv.get('status') == 'approved' or inv.get('analysis_status') == 'processing':
         await cbq.message.answer('Сначала верните принятую накладную на проверку или дождитесь текущего распознавания.')
         return
-    await cbq.message.answer('Распознать оригинал заново? Ручные изменения будут заменены.',
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await display(cbq.message, 'Распознать оригинал заново? Ручные изменения будут заменены.',
+        keyboard=InlineKeyboardMarkup(inline_keyboard=[
             [button('Распознать заново', cb('retryok', inv), 'danger')],
             [button('Отмена', cb('page', inv))]]))
 
@@ -257,14 +258,14 @@ async def admin_invoice_confirm(cbq: CallbackQuery, state: FSMContext, settings:
     kb.button(text="❌ Отмена", callback_data="ainv:cancel")
     kb.adjust(1)
 
-    await cbq.message.answer(
+    await display(cbq.message,
         "📈 <b>Процент вознаграждения</b>\n\n"
         f"🆔 Накладная: <b>#{invoice_id}</b>\n"
         f"📦 Позиций: <b>{len(items)}</b>\n"
         f"🔢 Количество товаров: <b>{_percent(total_qty)}</b>\n"
         f"💰 Сумма продаж: <b>{_money(deal_amount)}</b> ₽\n\n"
         "Введите процент числом. Например: <code>5</code> или <code>7,5</code>.",
-        reply_markup=kb.as_markup(),
+        keyboard=kb.as_markup(), edit=True,
     )
 
 
@@ -304,11 +305,11 @@ async def admin_invoice_reject(cbq: CallbackQuery, state: FSMContext, settings: 
     kb = InlineKeyboardBuilder()
     kb.button(text="❌ Отмена", callback_data="ainv:cancel")
     kb.adjust(1)
-    await cbq.message.answer(
+    await display(cbq.message,
         "❌ <b>Отклонение накладной</b>\n\n"
         f"🆔 <b>#{invoice_id}</b>\n"
         "Напишите короткую причину отклонения.",
-        reply_markup=kb.as_markup(),
+        keyboard=kb.as_markup(), edit=True,
     )
 
 
@@ -344,9 +345,13 @@ async def admin_invoice_pending(cbq: CallbackQuery, settings: Settings) -> None:
 
 
 @router.callback_query(F.data == "ainv:cancel")
-async def admin_invoice_cancel(cbq: CallbackQuery, state: FSMContext) -> None:
+async def admin_invoice_cancel(cbq: CallbackQuery, state: FSMContext, settings: Settings) -> None:
     await cbq.answer("Отменено")
+    data = await state.get_data()
     await state.clear()
+    if data.get('invoice_id'):
+        from handlers.admin.invoice_editor import send_overview
+        await send_overview(cbq.message, settings, int(data['invoice_id']), actor=cbq.from_user.id, edit=True)
 
 
 @router.message(AdminInvoice.waiting_items)

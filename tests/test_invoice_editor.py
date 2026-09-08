@@ -52,7 +52,7 @@ class RulesTests(unittest.TestCase):
             text,kb,rich=overview(inv,a,page=page)
             self.assertLess(len(text),4096)
             self.assertNotIn('ООО <Компания>',text)
-            self.assertIn('<table>',rich)
+            self.assertIn('<table bordered striped compact>',rich)
             self.assertIn('<tg-button',rich)
             self.assertEqual(sum(1 for row in kb.inline_keyboard for b in row if ':item:' in b.callback_data),6)
             for row in kb.inline_keyboard:
@@ -111,8 +111,59 @@ class EditorFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admin_menu_does_not_open_user_menu(self):
         await self.message('🧾 Накладные')
-        self.assertIn('На проверке',self.session.calls[-1].text)
-        self.assertTrue(any(b.callback_data.startswith('iv:page:') for row in self.session.calls[-1].reply_markup.inline_keyboard for b in row))
+        self.assertIn('На проверке',self.session.calls[-1].rich_message['html'])
+        self.assertIn('iv:page:',self.session.calls[-1].rich_message['html'])
+        self.assertEqual(self.session.calls[-1].reply_markup.inline_keyboard, [])
+
+    async def test_table_actions_are_unique_and_fields_are_inside_cells(self):
+        from html.parser import HTMLParser
+        class Inspect(HTMLParser):
+            def __init__(self):
+                super().__init__(); self.path=[]; self.actions=[]; self.tables=[]
+            def handle_starttag(self, tag, attrs):
+                attrs=dict(attrs)
+                if tag=='table': self.tables.append(attrs)
+                if tag=='tg-button': self.actions.append((attrs.get('data'), 'td' in self.path))
+                if tag not in {'br','hr'}: self.path.append(tag)
+            def handle_endtag(self, tag):
+                if self.path and self.path[-1] == tag: self.path.pop()
+        inv=await self.inv()
+        await self.click(cb('page',inv))
+        method=self.session.calls[-1]
+        self.assertEqual(method.reply_markup.inline_keyboard, [])
+        doc=Inspect(); doc.feed(method.rich_message['html'])
+        actions=[a for a,_ in doc.actions]
+        self.assertEqual(len(actions),len(set(actions)))
+        self.assertTrue(all('bordered' in t and 'striped' in t for t in doc.tables))
+        self.assertTrue(any(':item:' in a and inside for a,inside in doc.actions))
+        await self.click(cb('item',inv,index=0))
+        doc=Inspect(); doc.feed(self.session.calls[-1].rich_message['html'])
+        fields=[(a,inside) for a,inside in doc.actions if ':field:' in a]
+        self.assertEqual(len(fields),9)
+        self.assertTrue(all(inside for _,inside in fields))
+
+    async def test_native_status_switch_and_back_from_confirmation(self):
+        inv=await self.inv()
+        await self.click(cb('confirm',inv))
+        self.assertIn('Процент вознаграждения',self.session.calls[-1].rich_message['html'])
+        await self.click('ainv:cancel')
+        self.assertIn('<table bordered',self.session.calls[-1].rich_message['html'])
+        await self.click('ainv:panel:rejected:0')
+        content=self.session.calls[-1].rich_message['html']
+        self.assertIn('пока нет накладных',content)
+        self.assertIn('ainv:panel:pending:0',content)
+        self.assertIn('ainv:panel:approved:0',content)
+        self.assertEqual(self.session.calls[-1].reply_markup.inline_keyboard, [])
+
+    async def test_old_server_receives_full_classic_keyboard_on_edit(self):
+        from services.telegram_invoice_ui import EditRichInvoice
+        inv=await self.inv()
+        text,kb,rich=overview(inv,analysis())
+        fake=SimpleNamespace(chat=SimpleNamespace(id=1),message_id=1,bot=AsyncMock(),edit_text=AsyncMock())
+        fake.bot.side_effect=TelegramNotFound(method=EditRichInvoice(chat_id=1,message_id=1,rich_message={'html':'x'}),message='Not Found')
+        await display(fake,text,kb,rich=rich,edit=True)
+        fake.edit_text.assert_awaited_once_with(text,parse_mode='HTML',reply_markup=kb)
+        self.assertTrue(any(':item:' in b.callback_data for row in kb.inline_keyboard for b in row))
 
     async def test_field_edit_persists_and_cancel_does_not_modify(self):
         inv=await self.inv()
