@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 import aiosqlite
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
@@ -147,6 +147,90 @@ class EditorFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('iv:page:',self.session.calls[-1].rich_message['html'])
         self.assertEqual(self.session.calls[-1].reply_markup.inline_keyboard, [])
 
+    async def test_user_can_open_pending_invoices_from_menu(self):
+        await create_invoice(self.path,3,'other-user-file','photo')
+        await self.message('🧾 Накладные',uid=2)
+        menu=self.session.calls[-1]
+        pending=next(b for row in menu.reply_markup.inline_keyboard for b in row
+                     if b.text=='🟡 На проверке')
+        self.assertIn('На проверке: <b>1</b>',menu.text)
+        await self.click(pending.callback_data,uid=2)
+        listing=self.session.calls[-1]
+        self.assertIn('Накладные на проверке',listing.text)
+        opens=[b.callback_data for row in listing.reply_markup.inline_keyboard for b in row
+               if b.callback_data.startswith('uinv:open:')]
+        self.assertEqual(opens,[f'uinv:open:{self.ident}'])
+        await self.click(opens[0],uid=2)
+        original=self.session.calls[-1]
+        self.assertEqual(original.__api_method__,'sendPhoto')
+        self.assertEqual(original.photo,'test-file')
+        self.assertIn('На проверке',original.caption)
+        self.assertFalse(any(b.callback_data.startswith('iv:')
+                             for row in original.reply_markup.inline_keyboard for b in row))
+        await self.click(cb('page',await self.inv()),uid=2)
+        self.assertIn('только администратору',self.session.calls[-1].text)
+
+    async def test_pending_invoice_document_and_foreign_file_access(self):
+        ident=await create_invoice(self.path,2,'document-file','document')
+        await self.click(f'uinv:open:{ident}',uid=2)
+        self.assertEqual(self.session.calls[-1].__api_method__,'sendDocument')
+        self.assertEqual(self.session.calls[-1].document,'document-file')
+        self.session.calls.clear()
+        await self.click(f'uinv:open:{ident}',uid=3)
+        self.assertIn('не найдена',self.session.calls[-1].text)
+        self.assertFalse(any(c.__api_method__ in {'sendPhoto','sendDocument'}
+                             for c in self.session.calls))
+
+    async def test_pending_list_pagination_and_return_to_menu(self):
+        expected={self.ident}
+        for index in range(11):
+            expected.add(await create_invoice(self.path,2,f'file-{index}','photo'))
+        seen=set()
+        for page in range(3):
+            await self.click(f'uinv:list:pending:{page}',uid=2)
+            listing=self.session.calls[-1]
+            rows=listing.reply_markup.inline_keyboard
+            opens=[b.callback_data for row in rows for b in row
+                   if b.callback_data.startswith('uinv:open:')]
+            ids={int(data.split(':')[-1]) for data in opens}
+            self.assertFalse(seen & ids)
+            seen.update(ids)
+            self.assertEqual(len(opens),5 if page<2 else 2)
+            self.assertTrue(all(len(row)==1 for row in rows[:len(opens)]))
+            self.assertEqual(rows[-1][0].callback_data,'uinv:menu')
+            if page==1:
+                self.assertEqual([b.callback_data for b in rows[-2]],
+                                 ['uinv:list:pending:0','uinv:list:pending:2'])
+        self.assertEqual(seen,expected)
+        await self.click('uinv:list:pending:999',uid=2)
+        self.assertIn('Стр. <b>3</b>/<b>3</b>',self.session.calls[-1].text)
+        await self.click('uinv:list:pending:-1',uid=2)
+        self.assertIn('Стр. <b>1</b>/<b>3</b>',self.session.calls[-1].text)
+        await self.click('uinv:menu',uid=2)
+        self.assertIn('На проверке: <b>12</b>',self.session.calls[-1].text)
+
+    async def test_pending_list_updates_after_approval_and_empty_list_has_menu(self):
+        await approve_invoice(self.path,self.ident,180,9,analysis()['items'])
+        await self.click('uinv:list:pending:0',uid=2)
+        listing=self.session.calls[-1]
+        self.assertIn('Накладные на проверке',listing.text)
+        self.assertIn('Пока пусто',listing.text)
+        self.assertEqual(listing.reply_markup.inline_keyboard[0][0].callback_data,'uinv:menu')
+        await self.click('uinv:list:approved:0',uid=2)
+        self.assertIn('Принятые накладные',self.session.calls[-1].text)
+        self.assertIn('Вознаграждение',self.session.calls[-1].text)
+        await self.click('uinv:list:rejected:0',uid=2)
+        self.assertIn('Отклонённые накладные',self.session.calls[-1].text)
+
+    async def test_invalid_user_invoice_list_callbacks_show_alert(self):
+        for data in ('uinv:list:unknown:0','uinv:list:pending:no',
+                     'uinv:list:pending','uinv:list:pending:0:extra'):
+            with self.subTest(data=data):
+                self.session.calls.clear()
+                await self.click(data,uid=2)
+                self.assertEqual(len(self.session.calls),1)
+                self.assertTrue(self.session.calls[-1].show_alert)
+
     async def test_table_actions_are_unique_and_fields_are_inside_cells(self):
         from html.parser import HTMLParser
         class Inspect(HTMLParser):
@@ -219,14 +303,75 @@ class EditorFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.click(cb('deleteok',inv,index=0)) # obsolete revision must not delete another item
         self.assertEqual(len(decode_invoice_analysis(await self.inv())['items']),1)
 
-    async def test_authorization_owner_read_only_and_stranger_denied(self):
+    async def test_invoice_details_are_admin_only_even_for_owner(self):
         inv=await self.inv()
         await self.click(cb('page',inv),uid=2)
         await self.click(cb('field',inv,index=0,field=0),uid=2)
-        self.assertIn('только администратор',self.session.calls[-1].text)
+        self.assertIn('только администратору',self.session.calls[-1].text)
         await self.click(cb('page',inv),uid=3)
-        self.assertIn('недоступна',self.session.calls[-1].text)
+        self.assertIn('только администратору',self.session.calls[-1].text)
         self.assertEqual(inv['analysis_json'],(await self.inv())['analysis_json'])
+
+    async def test_upload_only_sends_pending_status_to_manager(self):
+        from aiogram.types import Document
+        from handlers.user.invoices import NewInvoice
+        from services.invoice_recognition import InvoiceRecognitionError
+        for failure in (False, True):
+            with self.subTest(recognition_failed=failure):
+                context= self.dp.fsm.get_context(bot=self.bot,user_id=2,chat_id=2)
+                await context.set_state(NewInvoice.waiting_file)
+                self.session.calls.clear()
+                message=Message(message_id=10,date=datetime.now(timezone.utc),chat=Chat(id=2,type='private'),
+                                from_user=User(id=2,is_bot=False,first_name='Manager'),
+                                document=Document(file_id='invoice-document',file_unique_id='invoice-document',file_name='invoice.pdf',mime_type='application/pdf'))
+                with patch('handlers.user.invoices.analyze_invoice_from_telegram',new_callable=AsyncMock) as recognize, \
+                     patch('handlers.user.invoices._notify_admins_new_invoice',new_callable=AsyncMock), \
+                     patch('handlers.user.invoices._notify_admins_duplicate_invoice',new_callable=AsyncMock), \
+                     patch('handlers.user.invoices._notify_admins_recognized',new_callable=AsyncMock):
+                    if failure:
+                        recognize.side_effect=InvoiceRecognitionError('Internal recognition error')
+                    else:
+                        recognize.return_value=analysis()
+                    await self.dp.feed_update(self.bot,Update(update_id=3,message=message),settings=self.settings)
+                self.assertEqual(len(self.session.calls),1)
+                self.assertEqual(self.session.calls[0].__api_method__,'sendMessage')
+                self.assertIn('на проверке',self.session.calls[0].text)
+                self.assertNotIn('Internal recognition',self.session.calls[0].text)
+                self.assertNotIn('Товар',self.session.calls[0].text)
+
+    async def test_approval_notifies_manager_with_reward_without_decoded_data(self):
+        await self.click(cb('confirm',await self.inv()))
+        self.session.calls.clear()
+        await self.message('5')
+        manager_calls=[method for method in self.session.calls if getattr(method,'chat_id',None)==2]
+        self.assertEqual(len(manager_calls),1)
+        self.assertEqual(manager_calls[0].__api_method__,'sendMessage')
+        self.assertIn('накладная принята',manager_calls[0].text)
+        self.assertIn('9,00',manager_calls[0].text)
+        self.assertNotIn('Товарных позиций',manager_calls[0].text)
+        self.assertNotIn('Сумма продаж',manager_calls[0].text)
+        self.assertEqual((await self.inv())['status'],'approved')
+
+    async def test_manager_excel_report_has_no_invoice_product_breakdown(self):
+        from pathlib import Path
+        from openpyxl import load_workbook
+        from services.analytics_report import build_user_report_xlsx,build_admin_report_xlsx
+        await approve_invoice(self.path,self.ident,180,9,analysis()['items'])
+        for admin in (False,True):
+            if admin:
+                path=await build_admin_report_xlsx(self.path,'2020-01-01','2030-01-01','custom')
+            else:
+                path=await build_user_report_xlsx(self.path,2,'2020-01-01','2030-01-01','custom')
+            try:
+                book=load_workbook(path)
+                values=[cell.value for sheet in book for row in sheet for cell in row]
+                self.assertEqual(analysis()['items'][0]['product_name'] in values,admin)
+                if not admin:
+                    self.assertNotIn('Товары',book.sheetnames)
+                    self.assertNotIn('Сводка товаров',book.sheetnames)
+                book.close()
+            finally:
+                Path(path).unlink()
 
     async def test_concurrent_edits_and_approval_snapshot(self):
         inv=await self.inv(); version=revision(inv)

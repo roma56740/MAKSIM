@@ -14,6 +14,7 @@ from callbacks import BroadcastCb
 from config import Settings
 from db import is_admin, list_user_ids
 from keyboards.admin import admin_back_cancel_kb, admin_main_kb
+from services.chat_cleanup import keep_admin_messages
 
 
 router = Router()
@@ -314,6 +315,7 @@ async def broadcast_cancel_cb(call: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(BroadcastCb.filter(F.action == "send"))
+@keep_admin_messages
 async def broadcast_send(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
     if not await is_admin(settings.db_path, call.from_user.id, settings.admin_ids):
         await call.answer("Нет доступа", show_alert=True)

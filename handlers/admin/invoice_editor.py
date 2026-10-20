@@ -43,6 +43,9 @@ def value_text(key, value):
 
 
 def overview(inv, analysis, *, admin=True, page=0):
+    if not admin:
+        text = 'Расшифровка накладной доступна только администратору.'
+        return text, InlineKeyboardMarkup(inline_keyboard=[]), rich_text(text)
     items = analysis.get('items') or []
     pages = max(1, math.ceil(len(items) / PAGE))
     page = max(0, min(page, pages-1))
@@ -141,7 +144,7 @@ def overview(inv, analysis, *, admin=True, page=0):
 async def load(settings, invoice_id, actor):
     inv = await get_invoice_full(settings.db_path, invoice_id)
     admin = await is_admin(settings.db_path, actor, settings.admin_ids)
-    if not inv or (not admin and int(inv['tg_id']) != actor):
+    if not inv or not admin:
         return None, {}, admin
     analysis = decode_invoice_analysis(inv) or {'items': []}
     if not analysis.get('items') and inv.get('status') == 'approved':
@@ -152,20 +155,19 @@ async def load(settings, invoice_id, actor):
 
 
 async def send_overview(message, settings, invoice_id, *, actor=None, admin=True, page=0, edit=False, chat_id=None):
-    # Background notifications supply the already resolved admin recipient.
-    inv = await get_invoice_full(settings.db_path, invoice_id)
+    target = chat_id or message.chat.id
+    if actor is not None and actor != target and not await is_admin(settings.db_path, actor, settings.admin_ids):
+        return
+    inv, analysis, admin = await load(settings, invoice_id, target)
     if not inv:
         return
-    analysis = decode_invoice_analysis(inv) or {'items': []}
-    if actor is not None:
-        inv, analysis, admin = await load(settings, invoice_id, actor)
-        if not inv:
-            return
     text, kb, rich = overview(inv, analysis, admin=admin, page=page)
     return await display(message, text, kb, rich=rich, edit=edit, chat_id=chat_id)
 
 
 async def detail(message, inv, analysis, admin, *, index=-1, page=0, edit=True):
+    if not admin:
+        return
     rows = []
     fields = HEADER_FIELDS if index < 0 else ITEM_FIELDS
     data = analysis if index < 0 else analysis['items'][index]
@@ -223,11 +225,11 @@ async def navigate(query: CallbackQuery, state: FSMContext, settings: Settings):
         await query.answer('Кнопка устарела.', show_alert=True)
         return
     inv, analysis, admin = await load(settings, ident, query.from_user.id)
+    if not admin:
+        await query.answer('Расшифровка накладной доступна только администратору.', show_alert=True)
+        return
     if not inv:
         await query.answer('Накладная недоступна.', show_alert=True)
-        return
-    if not admin and action not in {'page','item','header'}:
-        await query.answer('Изменять данные может только администратор.', show_alert=True)
         return
     if action not in {'page', 'header'} and version != revision(inv):
         await query.answer('Данные изменились. Карточка обновлена.', show_alert=True)

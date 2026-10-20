@@ -23,7 +23,7 @@ from db.promotions import (
 from keyboards.admin import admin_back_cancel_kb, admin_main_kb
 from services.promotions import (
     archive_and_remove_promotion,
-    promotion_caption,
+    send_promotion,
 )
 
 router = Router()
@@ -34,6 +34,7 @@ BOT_TZ = ZoneInfo(os.getenv("BOT_TIMEZONE", "Europe/Moscow"))
 class PromotionForm(StatesGroup):
     title = State()
     content = State()
+    expiry = State()
     custom_expiry = State()
 
 
@@ -57,6 +58,33 @@ def _kind_kb():
     kb.button(text="⬅️ Назад", callback_data="promo:menu")
     kb.adjust(2, 1)
     return kb.as_markup()
+
+
+def _content_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Готово — выбрать срок", callback_data="promo:content:done")
+    kb.button(text="❌ Отмена", callback_data="promo:cancel")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def _save_content(message: Message, state: FSMContext, *, file_id=None, file_kind=None) -> None:
+    data = await state.get_data()
+    addition = (message.text or message.caption or "").strip()
+    text = str(data.get("text") or "")
+    if addition:
+        text = f"{text}\n\n{addition}" if text else addition
+    update = {"text": text}
+    if file_id:
+        update.update(file_id=file_id, file_kind=file_kind)
+    await state.update_data(**update)
+    await message.answer(
+        ("✅ Вложение сохранено.\n\n" if file_id else "✅ Текст добавлен.\n\n")
+        + "Можно отправить описание, продолжение текста или прикрепить документ. "
+        "Новый документ заменит предыдущее вложение.\n\n"
+        "Когда всё готово, нажмите кнопку ниже.",
+        reply_markup=_content_kb(),
+    )
 
 
 def _expiry_kb(source_id: int = 0):
@@ -120,6 +148,7 @@ async def _finish_creation(
     *,
     expires_at: str | None,
     source_id: int = 0,
+    created_by: int | None = None,
 ) -> None:
     if source_id:
         source = await get_promotion(settings.db_path, source_id)
@@ -145,7 +174,7 @@ async def _finish_creation(
         file_id=payload.get("file_id"),
         file_kind=payload.get("file_kind"),
         expires_at=expires_at,
-        created_by=message.from_user.id,
+        created_by=created_by if created_by is not None else message.from_user.id,
         duplicated_from=source_id or None,
     )
     await state.clear()
@@ -228,12 +257,11 @@ async def promotion_title(message: Message, state: FSMContext, settings: Setting
     await state.update_data(title=title)
     await state.set_state(PromotionForm.content)
     await message.answer(
-        "📝 Отправьте одним сообщением:\n"
-        "• текст;\n"
-        "• фото с подписью;\n"
-        "• файл с подписью.\n\n"
-        "Для фото или файла подпись должна быть не длиннее 700 символов.",
-        reply_markup=admin_back_cancel_kb(),
+        "📝 Отправьте документ или фото и подробное описание акции.\n\n"
+        "Файл и текст можно прислать отдельно, в любом порядке. "
+        "Длинное описание отправляйте несколькими сообщениями — они сохранятся вместе.\n\n"
+        "Когда закончите, нажмите «✅ Готово — выбрать срок».",
+        reply_markup=_content_kb(),
     )
 
 
@@ -241,24 +269,14 @@ async def promotion_title(message: Message, state: FSMContext, settings: Setting
 async def promotion_content_photo(message: Message, state: FSMContext, settings: Settings) -> None:
     if not await _admin(message.from_user.id, settings):
         return
-    caption = (message.caption or "").strip()
-    if len(caption) > 700:
-        await message.answer("Подпись слишком длинная. Сократите её до 700 символов.")
-        return
-    await state.update_data(text=caption, file_id=message.photo[-1].file_id, file_kind="photo")
-    await message.answer("⏳ На какой срок показать предложение?", reply_markup=_expiry_kb())
+    await _save_content(message, state, file_id=message.photo[-1].file_id, file_kind="photo")
 
 
 @router.message(PromotionForm.content, F.document)
 async def promotion_content_document(message: Message, state: FSMContext, settings: Settings) -> None:
     if not await _admin(message.from_user.id, settings):
         return
-    caption = (message.caption or "").strip()
-    if len(caption) > 700:
-        await message.answer("Подпись слишком длинная. Сократите её до 700 символов.")
-        return
-    await state.update_data(text=caption, file_id=message.document.file_id, file_kind="document")
-    await message.answer("⏳ На какой срок показать предложение?", reply_markup=_expiry_kb())
+    await _save_content(message, state, file_id=message.document.file_id, file_kind="document")
 
 
 @router.message(PromotionForm.content, F.text)
@@ -270,11 +288,41 @@ async def promotion_content_text(message: Message, state: FSMContext, settings: 
         await message.answer("Отменено.", reply_markup=admin_main_kb())
         return
     text = (message.text or "").strip()
-    if not text or len(text) > 3000:
-        await message.answer("Текст должен содержать от 1 до 3000 символов.")
+    if not text:
+        await message.answer("Отправьте непустой текст или прикрепите документ.")
         return
-    await state.update_data(text=text, file_id=None, file_kind="text")
-    await message.answer("⏳ На какой срок показать предложение?", reply_markup=_expiry_kb())
+    await _save_content(message, state)
+
+
+@router.callback_query(F.data == "promo:content:done")
+async def promotion_content_done(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
+    if not await _admin(call.from_user.id, settings):
+        return
+    if await state.get_state() != PromotionForm.content.state:
+        await call.answer("Откройте создание акции заново.", show_alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("file_id") and not str(data.get("text") or "").strip():
+        await call.answer("Сначала добавьте документ или описание.", show_alert=True)
+        return
+    await state.set_state(PromotionForm.expiry)
+    await call.answer()
+    await call.message.answer("⏳ На какой срок показать предложение?", reply_markup=_expiry_kb())
+
+
+@router.message(PromotionForm.content)
+async def promotion_content_other(message: Message, settings: Settings) -> None:
+    if not await _admin(message.from_user.id, settings):
+        return
+    await message.answer("Отправьте текст, документ или фото.", reply_markup=_content_kb())
+
+
+@router.message(PromotionForm.expiry, F.text.in_({"❌ Отмена", "⬅️ Назад"}))
+async def promotion_expiry_cancel(message: Message, state: FSMContext, settings: Settings) -> None:
+    if not await _admin(message.from_user.id, settings):
+        return
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=admin_main_kb())
 
 
 @router.callback_query(F.data.startswith("promo:expiry:"))
@@ -283,6 +331,9 @@ async def promotion_expiry(call: CallbackQuery, state: FSMContext, settings: Set
         return
     _, _, key, source_s = call.data.split(":", 3)
     source_id = int(source_s)
+    if not source_id and await state.get_state() != PromotionForm.expiry.state:
+        await call.answer("Сначала завершите добавление документа и описания.", show_alert=True)
+        return
     if key == "custom":
         await state.update_data(duplicate_source=source_id)
         await state.set_state(PromotionForm.custom_expiry)
@@ -297,7 +348,7 @@ async def promotion_expiry(call: CallbackQuery, state: FSMContext, settings: Set
 
     expires_at = None if key == "forever" else _expiry_iso(key)
     await call.answer()
-    await _finish_creation(call.message, state, settings, expires_at=expires_at, source_id=source_id)
+    await _finish_creation(call.message, state, settings, expires_at=expires_at, source_id=source_id, created_by=call.from_user.id)
 
 
 @router.message(PromotionForm.custom_expiry, F.text)
@@ -357,16 +408,9 @@ async def promotion_view(call: CallbackQuery, settings: Settings) -> None:
     if not item:
         await call.answer("Не найдено", show_alert=True)
         return
-    caption = promotion_caption(item, include_status=True)
     markup = _detail_kb(item, status, int(page_s))
-    kind = (item.get("file_kind") or "text").lower()
-    if kind == "photo" and item.get("file_id"):
-        await call.message.answer_photo(item["file_id"], caption=caption, reply_markup=markup)
-    elif kind == "document" and item.get("file_id"):
-        await call.message.answer_document(item["file_id"], caption=caption, reply_markup=markup)
-    else:
-        await call.message.answer(caption, reply_markup=markup)
     await call.answer()
+    await send_promotion(call.bot, call.message.chat.id, item, include_status=True, reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("promo:archive:"))

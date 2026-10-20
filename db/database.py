@@ -8,6 +8,7 @@ from db.support_chat import create_tables as create_support_chat_tables
 
 
 from db.ai_instructions import init_ai_db
+from db.chat_cleanup import init_chat_cleanup_db
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -445,6 +446,7 @@ async def init_db(db_path: str) -> None:
     # Открываем отдельное соединение только после фиксации основной миграции,
     # чтобы SQLite не блокировал базу при первом запуске/обновлении.
     await create_support_chat_tables(db_path)
+    await init_chat_cleanup_db(db_path)
 
 
 async def is_admin(db_path: str, tg_id: int, env_admin_ids: set[int]) -> bool:

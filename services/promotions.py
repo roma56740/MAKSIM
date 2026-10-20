@@ -9,6 +9,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardMarkup, Message
+from services.chat_cleanup import keep_admin_messages
 
 from db.personal_messages import list_approved_managers
 from db.promotions import (
@@ -28,10 +30,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def promotion_caption(promotion: dict[str, Any], *, include_status: bool = False) -> str:
+def promotion_caption(promotion: dict[str, Any], *, include_status: bool = False, include_text: bool = True) -> str:
     kind = "🔥 Акция" if promotion.get("kind") == "promotion" else "🎁 Спецпредложение"
     title = html.escape(str(promotion.get("title") or "Без названия"))
-    text = html.escape(str(promotion.get("text") or "").strip())
+    text = html.escape(str(promotion.get("text") or "").strip()) if include_text else ""
 
     lines = [f"{kind}", f"<b>{title}</b>"]
     if text:
@@ -54,18 +56,66 @@ def promotion_caption(promotion: dict[str, Any], *, include_status: bool = False
     return "\n".join(lines)
 
 
-async def send_promotion(bot: Bot, chat_id: int, promotion: dict[str, Any]):
-    caption = promotion_caption(promotion)
+def _visible_length(markup: str) -> int:
+    plain = html.unescape(markup.replace("<b>", "").replace("</b>", ""))
+    return sum(2 if ord(char) > 0xFFFF else 1 for char in plain)
+
+
+def split_promotion_text(text: str, limit: int = 3500) -> list[str]:
+    """Split before escaping HTML, preserving all characters and emoji boundaries."""
+    chunks = []
+    current = []
+    units = 0
+    for char in text:
+        width = 2 if ord(char) > 0xFFFF else 1
+        if units + width > limit:
+            chunks.append("".join(current))
+            current = []
+            units = 0
+        current.append(char)
+        units += width
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+async def send_promotion(
+    bot: Bot,
+    chat_id: int,
+    promotion: dict[str, Any],
+    *,
+    include_status: bool = False,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> list[Message]:
+    caption = promotion_caption(promotion, include_status=include_status)
     kind = (promotion.get("file_kind") or "text").lower()
     file_id = promotion.get("file_id")
-
+    has_media = kind in {"photo", "document"} and bool(file_id)
+    limit = 1024 if has_media else 4096
+    long_text = _visible_length(caption) > limit
+    if long_text:
+        caption = promotion_caption(promotion, include_status=include_status, include_text=False)
+    markup = None if long_text else reply_markup
+    sent = []
     if kind == "photo" and file_id:
-        return await bot.send_photo(chat_id=chat_id, photo=file_id, caption=caption)
-    if kind == "document" and file_id:
-        return await bot.send_document(chat_id=chat_id, document=file_id, caption=caption)
-    return await bot.send_message(chat_id=chat_id, text=caption)
+        sent.append(await bot.send_photo(chat_id=chat_id, photo=file_id, caption=caption, parse_mode="HTML", reply_markup=markup))
+    elif kind == "document" and file_id:
+        sent.append(await bot.send_document(chat_id=chat_id, document=file_id, caption=caption, parse_mode="HTML", reply_markup=markup))
+    else:
+        sent.append(await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML", reply_markup=markup))
+    if long_text:
+        chunks = split_promotion_text(str(promotion.get("text") or "").strip())
+        for index, chunk in enumerate(chunks):
+            sent.append(await bot.send_message(
+                chat_id=chat_id,
+                text=html.escape(chunk),
+                parse_mode="HTML",
+                reply_markup=reply_markup if index == len(chunks) - 1 else None,
+            ))
+    return sent
 
 
+@keep_admin_messages
 async def publish_promotion(
     bot: Bot,
     db_path: str,
@@ -92,7 +142,8 @@ async def publish_promotion(
                 continue
             try:
                 sent = await send_promotion(bot, tg_id, promotion)
-                await add_promotion_delivery(db_path, promotion_id, tg_id, sent.message_id)
+                for message in sent:
+                    await add_promotion_delivery(db_path, promotion_id, tg_id, message.message_id)
                 ok += 1
             except Exception as exc:
                 logger.warning("Promotion %s delivery to %s failed: %s", promotion_id, tg_id, exc)
@@ -123,18 +174,17 @@ async def archive_and_remove_promotion(bot: Bot, db_path: str, promotion_id: int
             # убираем текст предложения, чтобы оно больше не выглядело активным.
             try:
                 replacement = "⛔ <b>Предложение завершено</b>"
-                file_kind = str(promotion.get("file_kind") or "text").lower()
-                if file_kind in {"photo", "document"}:
-                    await bot.edit_message_caption(
-                        chat_id=tg_id,
-                        message_id=message_id,
-                        caption=replacement,
-                    )
-                else:
+                try:
                     await bot.edit_message_text(
                         chat_id=tg_id,
                         message_id=message_id,
                         text=replacement,
+                    )
+                except Exception:
+                    await bot.edit_message_caption(
+                        chat_id=tg_id,
+                        message_id=message_id,
+                        caption=replacement,
                     )
                 removed = True
             except Exception as exc:

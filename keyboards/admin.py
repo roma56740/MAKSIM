@@ -10,7 +10,7 @@ def admin_main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="👤 Модерация регистрации"), KeyboardButton(text="🤖 ИИ")],
-            [KeyboardButton(text="🌐 Регистрации сайта"), KeyboardButton(text="✉️ Личные сообщения")],
+            [KeyboardButton(text="🌐 Регистрации сайта")],
             [KeyboardButton(text="🧾 Управление накладными", style="primary"), KeyboardButton(text="💳 Счета")],
             [KeyboardButton(text="🏢 Поставщики"), KeyboardButton(text="📦 Excel-прайсы")],
             [KeyboardButton(text="📊 Аналитика"), KeyboardButton(text=BTN_ADMIN_USERS)],

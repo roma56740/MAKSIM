@@ -14,6 +14,7 @@ from services.site_registration_api import start_site_registration_api
 # user
 from handlers.user.pending_block import router as pending_router
 from handlers.user.catalog import router as user_catalog_router
+from handlers.user.suppliers import router as user_suppliers_router
 from handlers.start import router as start_router
 from handlers.user.kp_build import router as kp_build_router
 from handlers.user.profile import router as user_profile_router
@@ -48,6 +49,7 @@ from handlers.admin.ai import router as admin_ai_router  # ✅ ИИ
 from handlers.user.admin_chat import router as user_admin_chat_router
 from handlers.admin.support_chats import router as admin_support_chats_router
 from services.promotions import promotion_expiry_worker
+from services.chat_cleanup import ManagerIncomingCleanup, ManagerOutgoingCleanup, message_cleanup_worker
 
 async def main() -> None:
     settings = load_settings()
@@ -67,6 +69,8 @@ async def main() -> None:
 
     dp = Dispatcher()
     dp["settings"] = settings
+    bot.session.middleware(ManagerOutgoingCleanup(settings))
+    dp.update.outer_middleware(ManagerIncomingCleanup(settings))
 
     # Подтверждение регистрации сайта должно обрабатываться даже для новых
     # пользователей, которые ещё не получили обычный доступ к боту.
@@ -77,6 +81,7 @@ async def main() -> None:
     dp.include_router(admin_invoices_panel_router)
     dp.include_router(admin_invoices_router)
     dp.include_router(pending_router)
+    dp.include_router(user_suppliers_router)
     dp.include_router(user_catalog_router)
     dp.include_router(kp_build_router)
     dp.include_router(user_profile_router)
@@ -113,12 +118,15 @@ async def main() -> None:
         promotion_expiry_worker(bot, settings.db_path),
         name="promotion-expiry-worker",
     )
-    api_runner = await start_site_registration_api(bot, settings)
+    cleanup_task = asyncio.create_task(message_cleanup_worker(bot, settings), name="manager-message-cleanup")
+    api_runner = None
     try:
+        api_runner = await start_site_registration_api(bot, settings)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         expiry_task.cancel()
-        await asyncio.gather(expiry_task, return_exceptions=True)
+        cleanup_task.cancel()
+        await asyncio.gather(expiry_task, cleanup_task, return_exceptions=True)
         if api_runner is not None:
             await api_runner.cleanup()
 

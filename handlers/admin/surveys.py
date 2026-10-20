@@ -16,6 +16,7 @@ from openpyxl import Workbook
 
 from callbacks.surveys import SurveyAdminCb
 from config import Settings
+from services.chat_cleanup import keep_admin_messages
 from db import is_admin, list_user_ids
 from db.surveys import (
     count_surveys,
@@ -123,6 +124,7 @@ async def _check_admin(message_or_call: Message | CallbackQuery, settings: Setti
     return False
 
 
+@keep_admin_messages
 async def _send_survey_content(
     bot,
     chat_id: int,

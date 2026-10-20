@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import html
 import math
+import logging
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from filters.admin import NotAdmin
 from config import Settings
@@ -17,7 +18,6 @@ from db.invoices import (
     count_user_invoices_by_status,
     decode_invoice_analysis,
     get_invoice_full,
-    list_invoice_items,
     list_invoices_for_user,
     request_invoice_recheck,
 )
@@ -31,12 +31,16 @@ from services.invoice_workflow import (
     analyze_invoice_from_telegram,
     money,
 )
-from services.invoice_format import render_invoice_message
 
 router = Router()
 router.message.filter(NotAdmin())
 router.callback_query.filter(NotAdmin())
 PAGE_SIZE = 5
+LIST_TITLES = {
+    "pending": "🟡 Накладные на проверке",
+    "approved": "✅ Принятые накладные",
+    "rejected": "❌ Отклонённые накладные",
+}
 
 
 class NewInvoice(StatesGroup):
@@ -55,9 +59,10 @@ def _status_badge(status: str) -> str:
 def _menu_kb() -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Новая", callback_data="uinv:new")
+    kb.button(text="🟡 На проверке", callback_data="uinv:list:pending:0")
     kb.button(text="✅ Принятые", callback_data="uinv:list:approved:0")
     kb.button(text="❌ Отклонённые", callback_data="uinv:list:rejected:0")
-    kb.adjust(2, 1)
+    kb.adjust(2, 2)
     return kb
 
 
@@ -66,24 +71,19 @@ def _list_kb(status: str, page: int, total_pages: int, items: list[dict]) -> Inl
 
     for it in items:
         kb.button(text=f"📎 Открыть #{it['id']}", callback_data=f"uinv:open:{it['id']}")
+    kb.adjust(1)
 
-    nav = []
+    nav = InlineKeyboardBuilder()
     if page > 0:
-        nav.append(("⬅️", f"uinv:list:{status}:{page-1}"))
+        nav.button(text="⬅️", callback_data=f"uinv:list:{status}:{page-1}")
     if page + 1 < total_pages:
-        nav.append(("➡️", f"uinv:list:{status}:{page+1}"))
-    for t, cb in nav:
-        kb.button(text=t, callback_data=cb)
-
-    kb.button(text="🏠 Меню накладных", callback_data="uinv:menu")
-
-    # 1 кнопка на строку + навигация
-    if items:
-        kb.adjust(1)
-    if nav:
-        kb.adjust(1, len(nav), 1)
-    else:
-        kb.adjust(1, 1)
+        nav.button(text="➡️", callback_data=f"uinv:list:{status}:{page+1}")
+    if list(nav.buttons):
+        nav.adjust(2)
+        kb.attach(nav)
+    kb.row(InlineKeyboardButton(
+        text="🏠 Меню накладных", callback_data="uinv:menu"
+    ))
     return kb
 
 
@@ -92,6 +92,7 @@ def _menu_text(stats: dict[str, int]) -> str:
         "🧾 <b>Накладные</b>\n\n"
         "Выберите раздел ниже:\n"
         "➕ <b>Новая</b> — отправить накладную на проверку\n"
+        "🟡 <b>На проверке</b> — накладные, ожидающие решения\n"
         "✅ <b>Принятые</b> — начисленные вознаграждения\n"
         "❌ <b>Отклонённые</b> — с причиной\n\n"
         "📊 <b>Статистика:</b>\n"
@@ -116,11 +117,10 @@ def _list_text(title: str, status: str, page: int, total_pages: int, items: list
             reward = it.get("reward_amount")
             reward_txt = "—" if reward is None else f"{float(reward):,.2f}".replace(",", " ").replace(".", ",")
             block += f"\n🎁 Вознаграждение: <b>{reward_txt}</b>"
-            block += f"\n📦 Позиций: <b>{int(it.get('items_count') or 0)}</b>"
 
         if status == "rejected":
             reason = it.get("reason") or "—"
-            block += f"\n🧾 Причина: <b>{reason}</b>"
+            block += f"\n🧾 Причина: <b>{html.escape(str(reason))}</b>"
 
         lines.append(block)
 
@@ -293,18 +293,13 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
     )
     await state.clear()
 
-    # Старая надёжная схема сохранена: администратор получает файл сразу и не
-    # ждёт ответа внешнего сервиса распознавания.
-    await _notify_admins_new_invoice(message, settings, invoice_id)
-
-    progress = await message.answer(
-        "⏳ <b>ЗАГРУЖАЮ И АНАЛИЗИРУЮ…</b>\n\n"
-        "🔎 Проверяю номер и дату\n"
-        "📦 Читаю все товарные строки\n"
-        "💳 Сверяю скидки и итог к оплате\n\n"
-        "Большой документ может обрабатываться до минуты.",
+    await message.answer(
+        "🟡 <b>Накладная на проверке</b>\n\n"
+        f"Номер: <b>#{invoice_id}</b>\n"
+        "После проверки администратором сообщим результат и сумму вознаграждения.",
         reply_markup=user_main_kb(),
     )
+    await _notify_admins_new_invoice(message, settings, invoice_id)
 
     try:
         analysis = await analyze_invoice_from_telegram(
@@ -312,21 +307,9 @@ async def invoice_got_file(message: Message, state: FSMContext, settings: Settin
         )
         await _notify_admins_duplicate_invoice(message, settings, invoice_id, analysis)
         await _notify_admins_recognized(message, settings, invoice_id)
-        from handlers.admin.invoice_editor import send_overview
-        await send_overview(progress, settings, invoice_id, actor=message.from_user.id, edit=True)
     except InvoiceRecognitionError as exc:
-        try:
-            await progress.edit_text(
-                "⚠️ <b>Автоматически распознать накладную не удалось</b>\n\n"
-                f"{html.escape(str(exc))}\n\n"
-                "Файл сохранён и отправлен администратору. Он сможет запустить распознавание повторно.",
-            )
-        except Exception:
-            await message.answer(
-                "⚠️ Автоматически распознать накладную не удалось. "
-                "Файл сохранён и отправлен администратору.",
-                reply_markup=user_main_kb(),
-            )
+        logging.getLogger(__name__).warning("Invoice %s remains pending: %s", invoice_id, exc)
+        await _notify_admins_new_invoice(message, settings, invoice_id)
 
 
 @router.message(NewInvoice.waiting_file, ~F.text.in_(["❌ Отмена", "⬅️ Назад"]))
@@ -347,9 +330,15 @@ async def invoice_cancel(message: Message, state: FSMContext, settings: Settings
 
 @router.callback_query(F.data.startswith("uinv:list:"))
 async def invoice_list(cbq: CallbackQuery, settings: Settings) -> None:
+    try:
+        _, _, status, page_s = cbq.data.split(":")
+        page = int(page_s)
+        if status not in LIST_TITLES:
+            raise ValueError
+    except (ValueError, AttributeError):
+        await cbq.answer("Обновите меню накладных.", show_alert=True)
+        return
     await cbq.answer()
-    _, _, status, page_s = cbq.data.split(":", 3)
-    page = int(page_s)
 
     total = await count_invoices_for_user(settings.db_path, cbq.from_user.id, status)
     total_pages = max(1, math.ceil(total / PAGE_SIZE))
@@ -363,7 +352,7 @@ async def invoice_list(cbq: CallbackQuery, settings: Settings) -> None:
         offset=page * PAGE_SIZE,
     )
 
-    title = "✅ Принятые накладные" if status == "approved" else "❌ Отклонённые накладные"
+    title = LIST_TITLES[status]
     text = _list_text(title, status, page, total_pages, items)
     kb = _list_kb(status, page, total_pages, items).as_markup()
 
@@ -385,11 +374,11 @@ async def invoice_open_file(cbq: CallbackQuery, settings: Settings) -> None:
 
     caption = f"📎 Накладная <b>#{invoice_id}</b> • {_status_badge(inv.get('status', 'pending'))}"
 
-    from handlers.admin.invoice_editor import cb
     builder = InlineKeyboardBuilder()
-    builder.button(text="📦 Товары и реквизиты", callback_data=cb('page', inv))
     if inv.get("status") == "approved":
+        caption += f"\n🎁 Вознаграждение: <b>{money(inv.get('reward_amount'))}</b> ₽"
         builder.button(text="✍️ Попросить пересчёт", callback_data=f"uinv:recheck:{invoice_id}")
+    builder.button(text="⬅️ Мои накладные", callback_data=f"uinv:list:{inv.get('status', 'pending')}:0")
     builder.adjust(1)
     kb = builder.as_markup()
 

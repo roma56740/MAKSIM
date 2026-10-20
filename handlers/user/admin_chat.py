@@ -11,11 +11,12 @@ from config import Settings
 from keyboards.user import (
     BTN_USER_ADMIN_CHAT,
     BTN_CHAT_CLOSE,
-    user_main_kb,
     user_support_chat_kb,
 )
+from keyboards.navigation import main_menu_kb
 from db import support_chat as sch
 from handlers.support_chat_states import SupportChatState
+from services.support_chat_ui import edit_chat_message, is_current_chat, serialize_chat_entry
 
 
 router = Router()
@@ -153,9 +154,11 @@ async def user_threads_page(call: CallbackQuery, callback_data: UThreadsCB, sett
 
 
 @router.callback_query(UNewThreadCB.filter())
+@serialize_chat_entry
 async def user_new_thread(call: CallbackQuery, settings: Settings, state: FSMContext):
     await call.answer()
-    thread_id = await sch.create_thread(settings.db_path, call.from_user.id)
+    thread_id, created = await sch.get_or_create_active_thread(settings.db_path, call.from_user.id)
+    already_open = await is_current_chat(state, SupportChatState.user_chat, thread_id)
 
     # уведомляем админов
     username = call.from_user.username or "без username"
@@ -169,7 +172,7 @@ async def user_new_thread(call: CallbackQuery, settings: Settings, state: FSMCon
     kb.button(text=f"💬 Открыть чат #{thread_id}", callback_data=f"a_open:{thread_id}:0")
     kb.adjust(1)
 
-    for admin_id in settings.admin_ids:
+    for admin_id in settings.admin_ids if created else ():
         try:
             await call.bot.send_message(admin_id, text_to_admin, reply_markup=kb.as_markup())
         except Exception:
@@ -180,32 +183,36 @@ async def user_new_thread(call: CallbackQuery, settings: Settings, state: FSMCon
     await state.update_data(thread_id=thread_id)
 
     hist_text, hist_kb, _thread = await _render_user_thread_history(settings, call.from_user.id, thread_id, 0)
-    await call.message.answer(hist_text, reply_markup=hist_kb)
-    await call.message.answer(
-        "✅ Чат открыт. Пишите сообщение — оно уйдёт админу.\nЧтобы завершить — нажмите <b>🔒 Закрыть чат</b>.",
-        reply_markup=user_support_chat_kb(),
-    )
+    await edit_chat_message(call.message, hist_text, hist_kb)
+    if not already_open:
+        await call.message.answer(
+            "✅ Чат открыт. Пишите сообщение — оно уйдёт админу.\nЧтобы завершить — нажмите <b>🔒 Закрыть чат</b>.",
+            reply_markup=user_support_chat_kb(),
+        )
 
 
 @router.callback_query(UOpenThreadCB.filter())
+@serialize_chat_entry
 async def user_open_thread(call: CallbackQuery, callback_data: UOpenThreadCB, settings: Settings, state: FSMContext):
     await call.answer()
     text, markup, thread = await _render_user_thread_history(
         settings, call.from_user.id, callback_data.thread_id, callback_data.page_from_newest
     )
-    await call.message.edit_text(text, reply_markup=markup)
+    await edit_chat_message(call.message, text, markup)
 
     # если чат активен — переводим в режим переписки (клавиатура “закрыть чат”)
     if thread and thread.status == "active":
+        already_open = await is_current_chat(state, SupportChatState.user_chat, thread.id)
         await state.set_state(SupportChatState.user_chat)
         await state.update_data(thread_id=thread.id)
-        await call.message.answer(
-            "✍️ Вы в активном чате. Пишите сообщение.\nЗакрыть: <b>🔒 Закрыть чат</b>",
-            reply_markup=user_support_chat_kb(),
-        )
+        if not already_open:
+            await call.message.answer(
+                "✍️ Вы в активном чате. Пишите сообщение.\nЗакрыть: <b>🔒 Закрыть чат</b>",
+                reply_markup=user_support_chat_kb(),
+            )
     else:
         await state.clear()
-        await call.message.answer("ℹ️ Этот чат закрыт. Можно начать новый.", reply_markup=user_main_kb())
+        await call.message.answer("ℹ️ Этот чат закрыт. Можно начать новый.", reply_markup=await main_menu_kb(settings, call.from_user.id))
 
 
 @router.message(SupportChatState.user_chat, F.text == BTN_CHAT_CLOSE)
@@ -214,20 +221,20 @@ async def user_close_chat(message: Message, settings: Settings, state: FSMContex
     thread_id = data.get("thread_id")
     if not thread_id:
         await state.clear()
-        await message.answer("ℹ️ Нет активного чата.", reply_markup=user_main_kb())
+        await message.answer("ℹ️ Нет активного чата.", reply_markup=await main_menu_kb(settings, message.from_user.id))
         return
 
     thread = await sch.get_thread(settings.db_path, thread_id)
     if not thread or thread.user_id != message.from_user.id:
         await state.clear()
-        await message.answer("ℹ️ Чат уже закрыт или недоступен.", reply_markup=user_main_kb())
+        await message.answer("ℹ️ Чат уже закрыт или недоступен.", reply_markup=await main_menu_kb(settings, message.from_user.id))
         return
 
     thread = await sch.close_thread(settings.db_path, thread_id)
     await state.clear()
 
     # пользователю
-    await message.answer(f"🔒 Чат #{thread_id} закрыт. Возвращаю меню.", reply_markup=user_main_kb())
+    await message.answer(f"🔒 Чат #{thread_id} закрыт. Возвращаю меню.", reply_markup=await main_menu_kb(settings, message.from_user.id))
 
     # админу (или всем админам, если не назначен)
     admins = [thread.admin_id] if thread and thread.admin_id else list(settings.admin_ids)
@@ -250,7 +257,7 @@ async def user_send_to_admin(message: Message, settings: Settings, state: FSMCon
     thread = await sch.get_thread(settings.db_path, thread_id)
     if not thread or thread.status != "active":
         await state.clear()
-        await message.answer("🔒 Этот чат уже закрыт.", reply_markup=user_main_kb())
+        await message.answer("🔒 Этот чат уже закрыт.", reply_markup=await main_menu_kb(settings, message.from_user.id))
         return
 
     # сохраняем

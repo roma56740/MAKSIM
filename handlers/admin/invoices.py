@@ -132,14 +132,7 @@ async def _set_invoice_pending(db_path: str, invoice_id: int) -> None:
 
 
 async def _send_invoice_to_user(message: Message, inv: dict, caption: str, reply_markup=None) -> None:
-    if (inv.get("file_kind") or "").lower() == "photo":
-        await message.bot.send_photo(
-            int(inv["tg_id"]), inv["file_id"], caption=caption, reply_markup=reply_markup
-        )
-    else:
-        await message.bot.send_document(
-            int(inv["tg_id"]), inv["file_id"], caption=caption, reply_markup=reply_markup
-        )
+    await message.bot.send_message(int(inv["tg_id"]), caption, reply_markup=reply_markup)
 
 
 def _review_kb(invoice_id: int) -> InlineKeyboardBuilder:
@@ -447,9 +440,6 @@ async def admin_reward_percent_input(message: Message, state: FSMContext, settin
             caption = (
                 "✅ <b>Ваша накладная принята!</b>\n\n"
                 f"🆔 Номер: <b>#{invoice_id}</b>\n"
-                f"📦 Товарных позиций: <b>{len(items)}</b>\n"
-                f"💰 Сумма продаж: <b>{_money(deal_amount)}</b> ₽\n"
-                f"📈 Процент: <b>{_percent(reward_percent)}</b>%\n"
                 f"🎁 Вознаграждение: <b>{_money(reward)}</b> ₽\n\n"
                 "Баланс обновлён 💰\n\n"
                 "Если есть расхождение, нажмите кнопку ниже."

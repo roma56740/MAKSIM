@@ -20,6 +20,7 @@ def user_main_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🧾 Сформировать КП"), KeyboardButton(text="💬 Вопросы")],
             [KeyboardButton(text="🧾 Накладные"), KeyboardButton(text="💳 Счета")],
             [KeyboardButton(text="🎁 Акции"), KeyboardButton(text="📊 Мой отчёт")],
+            [KeyboardButton(text="🏢 Поставщики")],
             [KeyboardButton(text="👤 Профиль")],
             [KeyboardButton(text="ℹ️ Помощь")],
             [KeyboardButton(text=BTN_USER_ADMIN_CHAT)],  # ✅ под "Помощь"

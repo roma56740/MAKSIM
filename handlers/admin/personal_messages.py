@@ -13,6 +13,7 @@ from aiogram.types import BusinessConnection, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import Settings
+from services.chat_cleanup import keep_admin_messages
 from db import is_admin, list_db_admin_ids
 from db.personal_messages import (
     count_approved_managers,
@@ -274,6 +275,7 @@ async def personal_group_start(call: CallbackQuery, state: FSMContext, settings:
 
 
 @router.message(PersonalMessageForm.waiting_text, F.text)
+@keep_admin_messages
 async def personal_text_input(message: Message, state: FSMContext, settings: Settings) -> None:
     if not await _admin(message.from_user.id, settings):
         return
@@ -348,6 +350,7 @@ async def personal_text_input(message: Message, state: FSMContext, settings: Set
 
 
 @router.callback_query(F.data.in_({"pmsg:send_audience", "pmsg:send_all"}))
+@keep_admin_messages
 async def personal_send_audience(call: CallbackQuery, state: FSMContext, settings: Settings) -> None:
     if not await _admin(call.from_user.id, settings):
         return

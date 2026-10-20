@@ -47,6 +47,7 @@ def _now_iso() -> str:
 async def create_tables(db_path: str) -> None:
     async with aiosqlite.connect(db_path) as db:
         await db.execute("PRAGMA foreign_keys = ON;")
+        await db.execute("BEGIN IMMEDIATE")
 
         await db.execute(
             """
@@ -81,22 +82,56 @@ async def create_tables(db_path: str) -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_support_messages_thread ON support_messages(thread_id);")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_support_messages_created ON support_messages(created_at);")
 
+        # Retain older duplicate conversations and all messages as closed history.
+        await db.execute(
+            """
+            UPDATE support_threads SET status='closed', closed_at=?
+            WHERE status='active' AND EXISTS (
+                SELECT 1 FROM support_threads newer
+                WHERE newer.user_id=support_threads.user_id AND newer.status='active'
+                  AND (newer.updated_at > support_threads.updated_at OR
+                       (newer.updated_at = support_threads.updated_at AND newer.id > support_threads.id))
+            )
+            """,
+            (_now_iso(),),
+        )
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_support_threads_one_active_user "
+            "ON support_threads(user_id) WHERE status='active'"
+        )
+
         await db.commit()
 
 
 async def create_thread(db_path: str, user_id: int) -> int:
+    thread_id, _ = await get_or_create_active_thread(db_path, user_id)
+    return thread_id
+
+
+async def get_or_create_active_thread(
+    db_path: str, user_id: int, admin_id: int | None = None,
+) -> tuple[int, bool]:
+    """Return one active conversation even when both sides open it concurrently."""
     now = _now_iso()
     async with aiosqlite.connect(db_path) as db:
         await db.execute("PRAGMA foreign_keys = ON;")
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (await db.execute(
+            "SELECT id FROM support_threads WHERE user_id=? AND status='active'",
+            (user_id,),
+        )).fetchone()
+        if row:
+            await db.commit()
+            return int(row[0]), False
         cur = await db.execute(
             """
             INSERT INTO support_threads (user_id, admin_id, status, created_at, updated_at, closed_at)
-            VALUES (?, NULL, 'active', ?, ?, NULL)
+            VALUES (?, ?, 'active', ?, ?, NULL)
             """,
-            (user_id, now, now),
+            (user_id, admin_id, now, now),
         )
         await db.commit()
-        return int(cur.lastrowid)
+        return int(cur.lastrowid), True
 
 
 async def set_thread_admin(db_path: str, thread_id: int, admin_id: int) -> None:

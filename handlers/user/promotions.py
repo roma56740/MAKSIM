@@ -10,7 +10,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import Settings
 from db.promotions import get_promotion, list_active_promotions
 from filters.admin import NotAdmin
-from services.promotions import promotion_caption
+from services.promotions import send_promotion
 
 router = Router()
 router.message.filter(NotAdmin())
@@ -95,15 +95,8 @@ async def user_promotion_view(call: CallbackQuery, settings: Settings) -> None:
         await call.answer("Предложение уже завершено", show_alert=True)
         return
 
-    caption = promotion_caption(item)
-    kind = (item.get("file_kind") or "text").lower()
-    if kind == "photo" and item.get("file_id"):
-        await call.message.answer_photo(item["file_id"], caption=caption)
-    elif kind == "document" and item.get("file_id"):
-        await call.message.answer_document(item["file_id"], caption=caption)
-    else:
-        await call.message.answer(caption)
     await call.answer()
+    await send_promotion(call.bot, call.message.chat.id, item)
 
 
 @router.callback_query(F.data == "upromo:noop")
