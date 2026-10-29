@@ -99,9 +99,31 @@ def update_item(item, field, value):
         item['discount_percent'] = rounded((q * before - total) / (q * before) * 100) if before else 0.0
 
 
+def items_subtotal(items):
+    return rounded(sum((decimal(rounded(
+        decimal(item.get('quantity')) * decimal(item.get('unit_price_before_discount')
+            if item.get('unit_price_before_discount') is not None else item.get('unit_price'))
+    )) for item in items), Decimal(0)))
+
+
 def recalculate(analysis):
-    """Line edits update the line sum; the printed payable stays independently editable."""
+    """Sum every line; manual documents follow items unless a total was explicitly fixed."""
     analysis['calculated_total'] = rounded(sum((decimal(x.get('line_total')) for x in analysis.get('items', [])), Decimal(0)))
+    if analysis.get('recognition_source') == 'manual':
+        fixed = set(analysis.get('manual_total_fields') or [])
+        before = decimal(analysis.get('subtotal_before_discount')) if 'subtotal_before_discount' in fixed else decimal(items_subtotal(analysis.get('items', [])))
+        if 'amount_payable' in fixed:
+            payable = decimal(analysis.get('amount_payable'))
+        elif 'discount_amount' in fixed:
+            discount = decimal(analysis.get('discount_amount'))
+            if discount > before:
+                raise ValueError('Общая скидка не может превышать сумму накладной до скидки.')
+            payable = before - discount
+        else:
+            payable = decimal(analysis['calculated_total'])
+        analysis['subtotal_before_discount'] = rounded(before)
+        analysis['amount_payable'] = analysis['total_amount'] = rounded(payable)
+        analysis['discount_amount'] = max(0, rounded(before - payable))
     analysis['manual_edited'] = True
 
 
@@ -111,7 +133,48 @@ def apply_change(analysis, index, field, value):
         update_item(result['items'][index], field, value)
     else:
         result[field] = value
+        if result.get('recognition_source') == 'manual' and field in {'subtotal_before_discount', 'discount_amount', 'amount_payable'}:
+            fixed = set(result.get('manual_total_fields') or [])
+            if field == 'amount_payable': fixed.discard('discount_amount')
+            if field == 'discount_amount': fixed.discard('amount_payable')
+            fixed.add(field)
+            result['manual_total_fields'] = sorted(fixed)
         if field == 'amount_payable':
             result['total_amount'] = value
+        if result.get('recognition_source') != 'manual':
+            before = decimal(result.get('subtotal_before_discount') if result.get('subtotal_before_discount') is not None else items_subtotal(result.get('items', [])))
+            if field == 'discount_amount':
+                if decimal(value) > before:
+                    raise ValueError('Общая скидка не может превышать сумму накладной до скидки.')
+                result['amount_payable'] = result['total_amount'] = rounded(before - decimal(value))
+            elif field in {'amount_payable', 'subtotal_before_discount'}:
+                result['discount_amount'] = max(0, rounded(before - decimal(result.get('amount_payable'))))
+    recalculate(result)
+    return result
+
+
+def manual_item(values):
+    """Use the same discount and rounding rules as the field editor."""
+    item = dict(values)
+    for key, default in (('article', None), ('unit', 'шт'), ('discount_percent', 0), ('discount_amount', 0)):
+        item.setdefault(key, default)
+    before = decimal(item['unit_price_before_discount'])
+    if decimal(item['unit_price']) > before:
+        raise ValueError('Цена после скидки не может быть выше цены до скидки.')
+    if decimal(item['line_total']) > decimal(item['quantity']) * before + Decimal('0.005'):
+        raise ValueError('Итог строки не может быть выше суммы до скидки.')
+    update_item(item, 'line_total', item['line_total'])
+    return item
+
+
+def manual_analysis(supplier, items, amount_payable, currency='RUB'):
+    line_sum = rounded(sum((decimal(x.get('line_total')) for x in items), Decimal(0)))
+    result = {
+        'document_type': 'Накладная', 'supplier': supplier, 'currency': currency,
+        'items': json.loads(json.dumps(items)), 'amount_payable': amount_payable,
+        'total_amount': amount_payable, 'recognition_source': 'manual',
+        'warnings': [], 'vat_amount': None,
+        'manual_total_fields': ['amount_payable'] if decimal(amount_payable) != decimal(line_sum) else [],
+    }
     recalculate(result)
     return result

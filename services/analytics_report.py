@@ -8,6 +8,7 @@ import aiosqlite
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
+from services.invoice_report import invoice_report_details
 
 
 def _safe(v: Any) -> Any:
@@ -427,18 +428,21 @@ async def build_user_report_xlsx(db_path: str, tg_id: int, start_iso: str, end_i
 
         ws_inv = wb.create_sheet("Накладные")
         inv_rows = await (await db.execute(
-            "SELECT i.id, i.supplier_id, i.deal_amount, i.reward_amount, i.file_id, i.file_kind, "
+            "SELECT i.id, i.supplier_id, s.name AS supplier_name, i.company_name, i.document_total, i.analysis_json, "
+            "i.deal_amount, i.reward_amount, i.file_id, i.file_kind, "
             "i.comment, i.status, i.reason, i.created_at, i.handled_at, i.updated_at, "
             f"{invoice_period_i} AS report_date "
             "FROM invoices i "
+            "LEFT JOIN suppliers s ON s.id = i.supplier_id "
             f"WHERE i.tg_id = ? AND {invoice_where_i} "
             "ORDER BY report_date DESC, i.id DESC",
             (tg_id, start_iso, end_iso)
         )).fetchall()
         _write_table(
             ws_inv,
-            ["Накладная", "Статус", "Вознаграждение", "Причина", "Создано", "Дата решения"],
-            [[r["id"], r["status"], r["reward_amount"], r["reason"], r["created_at"], r["handled_at"]] for r in inv_rows],
+            ["Накладная", "Статус", "Поставщик", "Сумма накладной", "Вознаграждение", "Причина", "Создано", "Дата решения"],
+            [[r["id"], r["status"], *invoice_report_details(dict(r)), r["reward_amount"],
+              r["reason"], r["created_at"], r["handled_at"]] for r in inv_rows],
         )
 
         ws_po = wb.create_sheet("Выплаты")

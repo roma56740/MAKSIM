@@ -220,6 +220,9 @@ async def save_invoice_analysis(
             from services.invoice_editor import revision
             if revision(dict(current)) != expected_revision or current['analysis_status'] == 'processing':
                 raise ValueError("Данные уже изменены. Откройте накладную заново.")
+        if analysis.get('recognition_source') == 'manual':
+            # The manually entered supplier may differ from the old catalog link.
+            await db.execute('UPDATE invoices SET supplier_id=NULL WHERE id=?', (invoice_id,))
         await db.execute(
             """
             UPDATE invoices

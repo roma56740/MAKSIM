@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, C
 from config import Settings
 from db import is_admin
 from db.invoices import get_invoice_full, decode_invoice_analysis, save_invoice_analysis, list_invoice_items
-from services.invoice_editor import HEADER_FIELDS, ITEM_FIELDS, NUMBERS, revision, parse_value, apply_change, recalculate
+from services.invoice_editor import HEADER_FIELDS, ITEM_FIELDS, NUMBERS, revision, parse_value, apply_change, recalculate, items_subtotal
 from services.invoice_workflow import money, quantity, deal_amount_from_analysis
 from services.telegram_invoice_ui import display, rich_button, rich_text, cell_text
 
@@ -50,13 +50,15 @@ def overview(inv, analysis, *, admin=True, page=0):
     pages = max(1, math.ceil(len(items) / PAGE))
     page = max(0, min(page, pages-1))
     status = {'pending': '🟡 На проверке', 'approved': '✅ Принята', 'rejected': '❌ Отклонена'}.get(inv.get('status'), 'На проверке')
-    lines = [f"🧾 <b>Накладная #{inv['id']}</b> · {status}",
-             f"<b>{esc(analysis.get('supplier'), 180)}</b>",
-             f"Документ № {esc(analysis.get('invoice_number'), 80)} · {esc(analysis.get('invoice_date'), 40)}",
-             f"Покупатель: {esc(analysis.get('buyer'), 180)}",
+    lines = [f"🧾 <b>Накладная #{inv['id']}</b> · {status}"]
+    lines += [f"<b>{label}:</b> {esc(value_text(key, analysis.get(key)), 180)}" for key, label in HEADER_FIELDS.items()]
+    lines += [
              f"\nК оплате: <b>{money(deal_amount_from_analysis(analysis))} {esc(analysis.get('currency') or 'RUB', 3)}</b>",
              f"Сумма строк: <b>{money(analysis.get('calculated_total'))}</b> · НДС: {money(analysis.get('vat_amount'))}",
              f"Скидка: {money(analysis.get('discount_amount'))} · Товаров: <b>{len(items)}</b>"]
+    if analysis.get('recognition_source') == 'manual':
+        lines.append('✍️ Заполнено вручную администратором.')
+        lines.append('Итоги заданы вручную.' if analysis.get('manual_total_fields') else 'Итоги рассчитываются по всем товарам.')
     if inv.get('analysis_status') != 'completed':
         lines.append({'processing': '⏳ Идёт распознавание. Обновите карточку немного позже.',
                       'failed': '⚠️ Распознавание не завершено. Можно добавить товары вручную.'}.get(inv.get('analysis_status'), '⏳ Данные ещё не распознаны.'))
@@ -85,22 +87,21 @@ def overview(inv, analysis, *, admin=True, page=0):
         }.get(inv.get('analysis_status'), '◷ Ожидает распознавания.') + '</blockquote>'
     if analysis.get('duplicate_matches') and admin:
         rich += f'<blockquote>⚠ Возможный повтор: <b>{esc(ids)}</b></blockquote>'
-    info = [
-        ('Номер', analysis.get('invoice_number')), ('Дата', analysis.get('invoice_date')),
-        ('Покупатель', analysis.get('buyer')), ('Сумма строк', money(analysis.get('calculated_total'))),
-        ('Общая скидка', money(analysis.get('discount_amount'))), ('НДС', money(analysis.get('vat_amount'))),
-    ]
+    info = [(label, value_text(key, analysis.get(key))) for key, label in HEADER_FIELDS.items()]
+    info.append(('Сумма строк', money(analysis.get('calculated_total'))))
+    if analysis.get('recognition_source') == 'manual':
+        info.append(('Источник данных', 'Ручное заполнение'))
+        info.append(('Расчёт итогов', 'Ручная сумма или скидка' if analysis.get('manual_total_fields') else 'Автоматически по всем товарам'))
     if admin:
         info += [('Отправитель', inv.get('user_full_name')), ('Телефон', inv.get('user_phone')),
                  ('Комментарий', inv.get('comment')), ('Причина отклонения', inv.get('reason'))]
         if inv.get('status') == 'approved':
             info += [('Вознаграждение', money(inv.get('reward_amount')))]
-    rich += '<details><summary>Реквизиты и результаты проверки</summary><table bordered striped compact>'
-    rich += ''.join(f'<tr><td>{label}</td><td>{cell_text(value, 350)}</td></tr>' for label, value in info if value is not None)
+    rich += '<h3>Реквизиты и результаты проверки</h3><table bordered striped compact>'
+    rich += ''.join(f'<tr><td>{label}</td><td>{cell_text(value, 500)}</td></tr>' for label, value in info)
     rich += '</table>'
     if warnings:
         rich += '<p>' + '<br>'.join(esc(w, 250) for w in warnings[:6]) + '</p>'
-    rich += '</details>'
     rich += f'<h3>Товары · {page+1}/{pages}</h3><p>Откройте товар кнопкой внутри строки.</p>'
     table = ['<table bordered striped compact>']
     for i in range(page*PAGE, min((page+1)*PAGE, len(items))):
@@ -127,8 +128,10 @@ def overview(inv, analysis, *, admin=True, page=0):
         nav.append(button('Далее ›', cb('page', inv, page+1)))
     if nav:
         rows.append(nav)
-    rows.append([button('🏢 Компания и суммы', cb('header', inv, 0), 'primary')])
+    rows.append([button('✎ Изменить реквизиты и суммы', cb('header', inv, 0), 'primary')])
     if admin:
+        if inv.get('status') != 'approved' and inv.get('analysis_status') != 'processing':
+            rows.append([button('✍️ Ручной ввод', cb('manual', inv), 'primary')])
         rows.append([button('＋ Добавить товар', cb('add', inv, page), 'success'), button('📎 Оригинал', f"ainv:open:{inv['id']}")])
         rows.append([button('✅ Подтвердить данные', cb('confirm', inv, page), 'success')])
         if inv.get('status') != 'approved':
@@ -173,15 +176,14 @@ async def detail(message, inv, analysis, admin, *, index=-1, page=0, edit=True):
     data = analysis if index < 0 else analysis['items'][index]
     if index < 0:
         title = f"🏢 <b>Компания и суммы · #{inv['id']}</b>"
-        keys = list(fields)[page*PAGE:(page+1)*PAGE]
-        pages = math.ceil(len(fields)/PAGE)
+        keys = list(fields)
+        page = 0
     else:
         title = f"📦 <b>Товар {index+1} из {len(analysis['items'])}</b>\n<b>{esc(data.get('product_name'))}</b>"
         keys = list(fields)
-        pages = 1
     lines = [title]
     rich = rich_text(title)
-    rich += '<p>Нажмите «✎» возле поля, чтобы изменить значение.</p>' if admin else '<p>Данные товара из накладной.</p>'
+    rich += '<p>Нажмите «✎ Изменить» возле нужного поля.</p>'
     rich += '<table bordered striped compact><tr><th>Поле</th><th>Значение</th></tr>'
     for key in keys:
         lines.append(f"<b>{fields[key]}:</b> {esc(value_text(key, data.get(key)))}")
@@ -191,18 +193,14 @@ async def detail(message, inv, analysis, admin, *, index=-1, page=0, edit=True):
             rows.append([button(f"✎ {fields[key]} · {value_text(key, data.get(key))[:32]}", field_action)])
             rich += '<tr><td colspan="2" align="center">' + rich_button('✎ Изменить', field_action) + '</td></tr>'
     rich += '</table>'
-    if admin and inv.get('status') == 'approved':
-        rich += '<blockquote>Изменения обновят аналитику. Процент вознаграждения сохраняется.</blockquote>' 
+    if inv.get('status') == 'approved':
+        rich += '<blockquote>Изменения обновят аналитику. Процент вознаграждения сохраняется.</blockquote>'
     if admin:
-        lines.append('\nНажмите на поле и отправьте новое значение. Изменения сохраняются сразу.')
+        lines.append('\nНажмите «✎ Изменить» возле поля и отправьте новое значение. Изменения сохраняются сразу.')
         if inv.get('status') == 'approved':
             lines.append('Изменения принятой накладной обновят аналитику. Процент вознаграждения сохраняется.')
     if index < 0:
-        nav=[]
-        if page: nav.append(button('‹ Реквизиты', cb('header', inv, page-1)))
-        if page+1 < pages: nav.append(button('Суммы ›', cb('header', inv, page+1)))
-        if nav: rows.append(nav)
-        if admin and page+1 == pages:
+        if admin:
             rows.append([button('К оплате = сумма товаров', cb('total', inv, page), 'primary')])
     else:
         nav=[]
@@ -245,7 +243,10 @@ async def navigate(query: CallbackQuery, state: FSMContext, settings: Settings):
         return
     await query.answer()
     await state.clear()
-    if action == 'page':
+    if action == 'manual':
+        from handlers.admin.invoice_manual import start_manual
+        await start_manual(query.message, state, inv, analysis)
+    elif action == 'page':
         await send_overview(query.message, settings, ident, actor=query.from_user.id, page=page, edit=True)
     elif action == 'header':
         await detail(query.message, inv, analysis, admin, page=min(page, (len(HEADER_FIELDS)-1)//PAGE))
@@ -281,12 +282,14 @@ async def navigate(query: CallbackQuery, state: FSMContext, settings: Settings):
         if action == 'deleteok':
             if not 0 <= index < len(analysis.get('items', [])): return
             analysis['items'].pop(index)
-        recalculate(analysis)
         if action == 'totalok':
-            analysis['amount_payable'] = analysis['total_amount'] = analysis['calculated_total']
-            analysis['subtotal_before_discount'] = round(sum(float(x.get('unit_price_before_discount') if x.get('unit_price_before_discount') is not None else x.get('unit_price') or 0) * float(x.get('quantity') or 0) for x in analysis.get('items', [])), 2)
-            analysis['discount_amount'] = max(0, round(analysis['subtotal_before_discount']-analysis['calculated_total'], 2))
+            analysis['manual_total_fields'] = []
         try:
+            recalculate(analysis)
+            if action == 'totalok':
+                analysis['amount_payable'] = analysis['total_amount'] = analysis['calculated_total']
+                analysis['subtotal_before_discount'] = items_subtotal(analysis.get('items', []))
+                analysis['discount_amount'] = max(0, round(analysis['subtotal_before_discount']-analysis['calculated_total'], 2))
             await save_invoice_analysis(settings.db_path, ident, analysis, expected_revision=version)
         except ValueError as exc:
             await query.message.answer(esc(exc))
@@ -341,5 +344,8 @@ async def input_value(message: Message, state: FSMContext, settings: Settings):
         await message.answer('⚠️ '+esc(exc)); return
     await state.clear()
     inv = await get_invoice_full(settings.db_path, inv['id'])
-    await message.answer('✅ Сохранено.' + (' Итог документа сохранён отдельно — проверьте сумму к оплате.' if adding or index >= 0 else ''))
+    note = ''
+    if adding or index >= 0:
+        note = ' Итоги пересчитаны по всем товарам.' if analysis.get('recognition_source') == 'manual' and not analysis.get('manual_total_fields') else ' Проверьте отдельно указанную сумму к оплате.'
+    await message.answer('✅ Сохранено.' + note)
     await detail(message, inv, analysis, True, index=index, page=index//PAGE if index >= 0 else data['page'], edit=False)

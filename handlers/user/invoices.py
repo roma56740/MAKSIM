@@ -31,6 +31,7 @@ from services.invoice_workflow import (
     analyze_invoice_from_telegram,
     money,
 )
+from services.invoice_report import invoice_report_details
 
 router = Router()
 router.message.filter(NotAdmin())
@@ -112,6 +113,12 @@ def _list_text(title: str, status: str, page: int, total_pages: int, items: list
         created = it.get("created_at") or "—"
         badge = _status_badge(it.get("status", status))
         block = f"{badge} <b>#{it['id']}</b>\n🕒 {created}"
+        supplier, amount = invoice_report_details(it)
+        amount_txt = '—' if amount is None else f'{money(amount)} ₽'
+        block += (
+            f"\n🏢 Поставщик: <b>{html.escape(supplier)}</b>"
+            f"\n💰 Сумма накладной: <b>{amount_txt}</b>"
+        )
 
         if status == "approved":
             reward = it.get("reward_amount")

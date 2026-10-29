@@ -137,8 +137,9 @@ async def _send_invoice_to_user(message: Message, inv: dict, caption: str, reply
 
 def _review_kb(invoice_id: int) -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
+    kb.button(text="✍️ Ручной ввод", callback_data=f"ainv:manual:{invoice_id}")
     kb.button(text="✅ Данные верны", callback_data=f"ainv:confirm:{invoice_id}")
-    kb.button(text="📦 Товары и реквизиты", callback_data=f"ainv:edit:{invoice_id}")
+    kb.button(text="✎ Реквизиты и товары", callback_data=f"ainv:edit:{invoice_id}")
     kb.button(text="🔄 Распознать заново", callback_data=f"ainv:retry:{invoice_id}")
     kb.button(text="❌ Отклонить", callback_data=f"ainv:reject:{invoice_id}")
     kb.adjust(1, 1, 2)
@@ -165,7 +166,7 @@ async def _recognize_and_show(message: Message, settings: Settings, invoice_id: 
             await progress.edit_text(
                 "⚠️ <b>Распознавание не завершено</b>\n\n"
                 f"{html.escape(str(exc))}\n\n"
-                "Можно попробовать ещё раз или исправить позиции вручную только как резервный вариант.",
+                "Можно повторить распознавание или открыть «Реквизиты и товары», исправить поля и добавить товары.",
                 reply_markup=_review_kb(invoice_id).as_markup(),
             )
         except Exception:

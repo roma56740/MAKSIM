@@ -27,6 +27,7 @@ from handlers.user.sales_report import router as user_sales_report_router
 # admin
 from handlers.admin.db_export import router as admin_db_export_router
 from handlers.admin.invoice_editor import router as invoice_editor_router
+from handlers.admin.invoice_manual import router as invoice_manual_router
 from handlers.admin.invoices_panel import router as admin_invoices_panel_router
 from handlers.admin.invoices import router as admin_invoices_router
 from handlers.admin.analytics import router as admin_analytics_router
@@ -77,6 +78,7 @@ async def main() -> None:
     dp.include_router(admin_site_registrations_router)
 
     # user (важно: pending первым среди обычных разделов)
+    dp.include_router(invoice_manual_router)
     dp.include_router(invoice_editor_router)
     dp.include_router(admin_invoices_panel_router)
     dp.include_router(admin_invoices_router)

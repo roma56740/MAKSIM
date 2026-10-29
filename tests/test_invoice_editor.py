@@ -25,6 +25,53 @@ def analysis():
 
 
 class RulesTests(unittest.TestCase):
+    def test_manual_totals_include_every_item_and_repair_legacy_auto_total(self):
+        from services.invoice_editor import recalculate,manual_item
+        items=[manual_item({'product_name':'A','quantity':4,'unit_price_before_discount':23,'unit_price':23,'line_total':92}),
+               manual_item({'product_name':'B','quantity':4,'unit_price_before_discount':400,'unit_price':400,'line_total':1600})]
+        data={'recognition_source':'manual','items':items,'subtotal_before_discount':92,'amount_payable':92,'discount_amount':0}
+        recalculate(data)
+        self.assertEqual(data['calculated_total'],1692)
+        self.assertEqual(data['subtotal_before_discount'],1692)
+        self.assertEqual(data['amount_payable'],1692)
+        self.assertEqual(data['total_amount'],1692)
+        self.assertEqual(data['discount_amount'],0)
+        changed=apply_change(data,1,'quantity',2)
+        self.assertEqual(changed['amount_payable'],892)
+        self.assertEqual(changed['calculated_total'],892)
+
+    def test_manual_line_and_overall_discount_are_not_subtracted_twice(self):
+        from services.invoice_editor import manual_analysis,manual_item
+        items=[manual_item({'product_name':'A','quantity':2,'unit_price_before_discount':100,'unit_price':90,'line_total':180}),
+               manual_item({'product_name':'B','quantity':3,'unit_price_before_discount':50,'unit_price':40,'line_total':120})]
+        data=manual_analysis('Supplier',items,300)
+        self.assertEqual(data['subtotal_before_discount'],350)
+        self.assertEqual(data['amount_payable'],300)
+        self.assertEqual(data['discount_amount'],50)
+        overall=apply_change(data,-1,'discount_amount',70)
+        self.assertEqual(overall['amount_payable'],280)
+        self.assertEqual(overall['calculated_total'],300)
+        self.assertEqual(sum(x['discount_amount'] for x in overall['items']),50)
+        with self.assertRaises(ValueError): apply_change(data,-1,'discount_amount',351)
+        printed=analysis()
+        printed['subtotal_before_discount']=200
+        printed=apply_change(printed,-1,'discount_amount',30)
+        self.assertEqual(printed['amount_payable'],170)
+        self.assertEqual(printed['total_amount'],170)
+
+    def test_manual_rounding_is_per_line_and_explicit_payable_is_preserved(self):
+        from services.invoice_editor import manual_analysis,manual_item
+        items=[manual_item({'product_name':str(i),'quantity':0.333333,'unit_price_before_discount':0.01,'unit_price':0.01,'line_total':0}) for i in range(3)]
+        tiny=manual_analysis('Supplier',items,0)
+        self.assertEqual(tiny['subtotal_before_discount'],0)
+        item=manual_item({'product_name':'A','quantity':2,'unit_price_before_discount':100,'unit_price':90,'line_total':180})
+        fixed=manual_analysis('Supplier',[item],170)
+        changed=apply_change(fixed,0,'quantity',3)
+        self.assertEqual(changed['calculated_total'],270)
+        self.assertEqual(changed['amount_payable'],170)
+        self.assertEqual(changed['subtotal_before_discount'],300)
+        self.assertEqual(changed['discount_amount'],130)
+
     def test_numbers_dates_and_nonfinite(self):
         self.assertEqual(parse_value('unit_price', '1 250,50'), 1250.5)
         self.assertEqual(parse_value('invoice_date', '29.02.2024'), '2024-02-29')
@@ -109,11 +156,12 @@ class EditorFlowTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         from handlers.admin.invoice_editor import router as editor
+        from handlers.admin.invoice_manual import router as manual
         from handlers.admin.invoices_panel import router as panel
         from handlers.admin.invoices import router as invoices
         from handlers.user.invoices import router as user
         cls.dp=Dispatcher()
-        for router in (editor,panel,invoices,user): cls.dp.include_router(router)
+        for router in (manual,editor,panel,invoices,user): cls.dp.include_router(router)
 
     async def asyncSetUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.path=self.tmp.name+'/test.sqlite'
@@ -253,7 +301,9 @@ class EditorFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all('bordered' in t and 'striped' in t for t in doc.tables))
         self.assertTrue(any(':item:' in a and inside for a,inside in doc.actions))
         await self.click(cb('item',inv,index=0))
-        doc=Inspect(); doc.feed(self.session.calls[-1].rich_message['html'])
+        method=self.session.calls[-1]
+        self.assertEqual(method.reply_markup.inline_keyboard, [])
+        doc=Inspect(); doc.feed(method.rich_message['html'])
         fields=[(a,inside) for a,inside in doc.actions if ':field:' in a]
         self.assertEqual(len(fields),9)
         self.assertTrue(all(inside for _,inside in fields))
@@ -381,6 +431,451 @@ class EditorFlowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await approve_invoice(self.path,self.ident,180,9,analysis()['items'],expected_revision=version)
         self.assertEqual((await self.inv())['status'],'pending')
+
+    def manual_state(self, uid=1):
+        return self.dp.fsm.get_context(bot=self.bot,user_id=uid,chat_id=uid)
+
+    async def manual_button(self, name):
+        from handlers.admin.invoice_manual import action
+        data=await self.manual_state().get_data()
+        callback=action(data,name)
+        await self.click(callback)
+        return callback
+
+    async def start_empty_manual(self):
+        from db.invoices import fail_invoice_analysis
+        self.ident=await create_invoice(self.path,2,'manual-file','photo')
+        await fail_invoice_analysis(self.path,self.ident,'Recognition failed')
+        await self.click(f'ainv:manual:{self.ident}')
+
+    async def test_manual_failed_invoice_two_items_edit_and_approve(self):
+        from db.invoices import decode_invoice_analysis
+        await self.start_empty_manual()
+        for text in ('ООО <Вручную>', 'Товар А', '2', '1000', '900', '-'):
+            await self.message(text)
+        self.assertIsNone((await self.inv())['analysis_json'])
+        await self.manual_button('next')
+        for text in ('Товар Б', '0,5', '500', '400', '190'):
+            await self.message(text)
+        await self.manual_button('total')
+        await self.message('-')
+        self.assertIsNone((await self.inv())['analysis_json'])
+        await self.manual_button('save')
+        inv=await self.inv(); data=decode_invoice_analysis(inv)
+        self.assertEqual(data['supplier'],'ООО <Вручную>')
+        self.assertEqual(data['recognition_source'],'manual')
+        self.assertEqual(len(data['items']),2)
+        self.assertEqual(data['items'][0]['unit_price_before_discount'],1000)
+        self.assertEqual(data['items'][0]['discount_amount'],200)
+        self.assertEqual(data['items'][1]['unit_price'],380)
+        self.assertEqual(data['calculated_total'],1990)
+        self.assertEqual(data['amount_payable'],1990)
+        self.assertEqual(inv['analysis_status'],'completed')
+        self.assertIsNone(inv['analysis_error'])
+        self.assertEqual(inv['status'],'pending')
+        self.assertIsNone(inv['reward_amount'])
+        self.assertEqual(await list_invoice_items(self.path,self.ident),[])
+        await self.click(cb('field',inv,index=0,field=0))
+        await self.message('Исправленный вручную товар')
+        inv=await self.inv()
+        self.assertEqual(decode_invoice_analysis(inv)['items'][0]['product_name'],'Исправленный вручную товар')
+        await self.click(cb('confirm',inv))
+        await self.message('5')
+        inv=await self.inv()
+        self.assertEqual(inv['status'],'approved')
+        self.assertEqual(inv['deal_amount'],1990)
+        self.assertEqual(inv['reward_amount'],99.5)
+        self.assertEqual(len(await list_invoice_items(self.path,self.ident)),2)
+
+    async def test_manual_cancel_preserves_original_and_existing_items_require_confirmation(self):
+        inv=await self.inv()
+        await self.click(cb('manual',inv))
+        self.assertIn('заменит',self.session.calls[-1].rich_message['html'])
+        self.assertEqual((await self.manual_state().get_data())['step'],'replace')
+        await self.manual_button('begin')
+        await self.message('Новый поставщик')
+        await self.message('/cancel')
+        self.assertEqual((await self.inv())['analysis_json'],inv['analysis_json'])
+        self.assertIsNone(await self.manual_state().get_state())
+
+    async def test_manual_validation_back_and_no_discount(self):
+        from db.invoices import decode_invoice_analysis
+        await self.start_empty_manual()
+        await self.message('-')
+        self.assertEqual((await self.manual_state().get_data())['step'],'supplier')
+        await self.message('Поставщик')
+        await self.message('Товар')
+        for text in ('0','-1','nan','inf','abc'):
+            await self.message(text)
+            self.assertEqual((await self.manual_state().get_data())['step'],'quantity')
+        await self.message('2')
+        await self.message('100')
+        await self.message('101')
+        self.assertEqual((await self.manual_state().get_data())['step'],'unit_price')
+        await self.message('-')
+        await self.message('201')
+        self.assertEqual((await self.manual_state().get_data())['step'],'line_total')
+        await self.manual_button('back')
+        self.assertEqual((await self.manual_state().get_data())['step'],'unit_price')
+        await self.message('-')
+        await self.message('-')
+        await self.manual_button('total')
+        await self.message('190')
+        self.assertIn('отличается',self.session.calls[-1].rich_message['html'])
+        await self.manual_button('save')
+        data=decode_invoice_analysis(await self.inv())
+        self.assertEqual(data['calculated_total'],200)
+        self.assertEqual(data['amount_payable'],190)
+        self.assertEqual(data['items'][0]['unit_price'],100)
+        self.assertEqual(data['items'][0]['discount_amount'],0)
+
+    async def test_manual_old_buttons_and_repeated_save_do_not_duplicate(self):
+        from db.invoices import decode_invoice_analysis
+        await self.start_empty_manual()
+        for text in ('Поставщик','Товар','1','100','90','-'):
+            await self.message(text)
+        old=await self.manual_button('next')
+        await self.click(old)
+        self.assertTrue(self.session.calls[-1].show_alert)
+        await self.manual_button('back')
+        await self.manual_button('total')
+        await self.message('-')
+        save=await self.manual_button('save')
+        snapshot=(await self.inv())['analysis_json']
+        await self.click(save)
+        self.assertTrue(self.session.calls[-1].show_alert)
+        self.assertEqual((await self.inv())['analysis_json'],snapshot)
+        self.assertEqual(len(decode_invoice_analysis(await self.inv())['items']),1)
+
+    async def test_manual_detects_external_edit_and_recognition_lock(self):
+        await self.start_empty_manual()
+        await self.message('Поставщик')
+        updated=analysis(); updated['supplier']='Изменил другой администратор'
+        await save_invoice_analysis(self.path,self.ident,updated)
+        snapshot=(await self.inv())['analysis_json']
+        await self.message('Устаревший товар')
+        self.assertIsNone(await self.manual_state().get_state())
+        self.assertEqual((await self.inv())['analysis_json'],snapshot)
+        await mark_invoice_analysis_processing(self.path,self.ident)
+        await self.click(f'ainv:manual:{self.ident}')
+        self.assertTrue(self.session.calls[-1].show_alert)
+
+    async def test_manual_is_admin_only_and_does_not_replace_approved_invoice(self):
+        inv=await self.inv()
+        for uid in (2,3):
+            await self.click(f'ainv:manual:{self.ident}',uid=uid)
+            self.assertTrue(self.session.calls[-1].show_alert)
+            await self.click(cb('manual',inv),uid=uid)
+            self.assertIn('только администратору',self.session.calls[-1].text)
+        self.assertEqual((await self.inv())['analysis_json'],inv['analysis_json'])
+        await approve_invoice(self.path,self.ident,180,9,analysis()['items'])
+        inv=await self.inv()
+        await self.click(f'ainv:manual:{self.ident}')
+        self.assertTrue(self.session.calls[-1].show_alert)
+        await self.click(cb('manual',inv))
+        self.assertIsNone(await self.manual_state().get_state())
+        self.assertEqual((await self.inv())['reward_amount'],9)
+
+    async def test_manual_reedit_last_item_and_finish_without_ai(self):
+        from db.invoices import decode_invoice_analysis
+        await self.start_empty_manual()
+        for text in ('Поставщик','Товар','1','100','90','-'):
+            await self.message(text)
+        await self.manual_button('edit_item')
+        for text in ('Исправленный товар','3','100','80','-'):
+            await self.message(text)
+        await self.manual_button('total')
+        await self.message('-')
+        await self.manual_button('save')
+        data=decode_invoice_analysis(await self.inv())
+        self.assertEqual(len(data['items']),1)
+        self.assertEqual(data['items'][0]['product_name'],'Исправленный товар')
+        self.assertEqual(data['amount_payable'],240)
+
+    async def test_manual_entry_button_and_regular_editing_available(self):
+        from handlers.admin.invoices import _recognize_and_show
+        from services.invoice_recognition import InvoiceRecognitionError
+        inv=await self.inv()
+        _,kb,_=overview(inv,analysis())
+        callbacks=[b.callback_data for row in kb.inline_keyboard for b in row]
+        self.assertTrue(any(':manual:' in data for data in callbacks))
+        self.assertTrue(any(b.text=='✍️ Ручной ввод' for row in kb.inline_keyboard for b in row))
+        self.assertTrue(any(':add:' in data for data in callbacks))
+        self.assertTrue(any(':header:' in data for data in callbacks))
+        progress=SimpleNamespace(edit_text=AsyncMock())
+        message=SimpleNamespace(answer=AsyncMock(return_value=progress),bot=self.bot)
+        with patch('handlers.admin.invoices.analyze_invoice_from_telegram',new=AsyncMock(side_effect=InvoiceRecognitionError('Error'))):
+            await _recognize_and_show(message,self.settings,self.ident)
+        callbacks=[b.callback_data for row in progress.edit_text.call_args.kwargs['reply_markup'].inline_keyboard for b in row]
+        self.assertIn(f'ainv:manual:{self.ident}',callbacks)
+        self.assertIn(f'ainv:edit:{self.ident}',callbacks)
+
+    async def test_all_header_fields_visible_with_table_buttons_and_save(self):
+        import re
+        import html
+        from db.invoices import decode_invoice_analysis
+        from services.invoice_editor import HEADER_FIELDS
+        values={'document_type':'Счёт', 'invoice_number':'Р-123', 'invoice_date':'28.10.2026',
+                'supplier':'Поставщик <Новый>', 'buyer':'Покупатель', 'responsible_manager':'Менеджер',
+                'currency':'rub', 'subtotal_before_discount':'250', 'discount_amount':'25',
+                'amount_payable':'225', 'vat_amount':'37,5'}
+        for field,text in values.items():
+            with self.subTest(field=field):
+                await self.click(cb('header',await self.inv(),page=1))
+                method=self.session.calls[-1]
+                self.assertEqual(method.reply_markup.inline_keyboard,[])
+                content=method.rich_message['html']
+                for label in HEADER_FIELDS.values(): self.assertIn(label,content.replace('\u200b',''))
+                buttons=[html.unescape(data) for data in re.findall(r'data="([^"]+)"',content) if ':field:' in data]
+                self.assertEqual(len(buttons),len(HEADER_FIELDS))
+                self.assertEqual(len(set(buttons)),len(buttons))
+                edit=next(data for data in buttons if int(data.split(':')[5])==list(HEADER_FIELDS).index(field))
+                await self.click(edit)
+                self.assertEqual(self.session.calls[-1].reply_markup.inline_keyboard,[])
+                self.assertIn('Сейчас:',self.session.calls[-1].rich_message['html'])
+                await self.message(text)
+                data=decode_invoice_analysis(await self.inv())
+                self.assertEqual(data[field],parse_value(field,text))
+        self.assertEqual(data['amount_payable'],data['total_amount'])
+
+    async def test_overview_shows_empty_header_fields_without_collapsing(self):
+        from services.invoice_editor import HEADER_FIELDS
+        text,kb,rich=overview({'id':999,'status':'pending','analysis_status':'failed','analysis_json':None},{'items':[]})
+        self.assertNotIn('<details>',rich)
+        for label in HEADER_FIELDS.values():
+            self.assertIn(label,text)
+            self.assertIn(label,rich)
+        self.assertIn('—',text)
+
+    async def test_add_item_and_edit_header_after_failed_recognition(self):
+        import re
+        import html
+        from db.invoices import decode_invoice_analysis,fail_invoice_analysis
+        self.ident=await create_invoice(self.path,2,'failed-file','photo')
+        await fail_invoice_analysis(self.path,self.ident,'Recognition failed')
+        await self.click(cb('header',await self.inv()))
+        header=self.session.calls[-1]
+        edit=next(html.unescape(data) for data in re.findall(r'data="([^"]+)"',header.rich_message['html'])
+                  if ':field:' in data and int(data.split(':')[5])==3)
+        await self.click(edit)
+        await self.message('Введённый поставщик')
+        await self.click(cb('add',await self.inv()))
+        for text in ('Пропущенный товар','2','100'): await self.message(text)
+        data=decode_invoice_analysis(await self.inv())
+        self.assertEqual(data['supplier'],'Введённый поставщик')
+        self.assertEqual(data['items'][0]['product_name'],'Пропущенный товар')
+        self.assertEqual(data['items'][0]['line_total'],200)
+
+    async def test_manual_replacement_preserves_document_headers_and_uses_new_supplier(self):
+        from db.invoices import decode_invoice_analysis
+        from services.invoice_report import invoice_report_details
+        original=analysis(); original.update(invoice_number='MAN-123',invoice_date='2026-10-28',buyer='Покупатель')
+        await save_invoice_analysis(self.path,self.ident,original)
+        async with aiosqlite.connect(self.path) as db:
+            cur=await db.execute("INSERT INTO suppliers(name,created_at,updated_at) VALUES ('Старый поставщик','now','now')")
+            await db.execute('UPDATE invoices SET supplier_id=? WHERE id=?',(cur.lastrowid,self.ident))
+            await db.commit()
+        await self.click(cb('manual',await self.inv()))
+        await self.manual_button('begin')
+        for text in ('Новый поставщик','Товар','1','100','-','-'):
+            await self.message(text)
+        await self.manual_button('total')
+        await self.message('-')
+        await self.manual_button('save')
+        inv=await self.inv(); data=decode_invoice_analysis(inv)
+        self.assertEqual(data['invoice_number'],'MAN-123')
+        self.assertEqual(data['invoice_date'],'2026-10-28')
+        self.assertEqual(data['buyer'],'Покупатель')
+        self.assertIsNone(inv['supplier_id'])
+        self.assertEqual(invoice_report_details(inv),('Новый поставщик',100))
+
+    async def test_manual_current_draft_cannot_save_after_another_admin_approves(self):
+        await self.start_empty_manual()
+        for text in ('Поставщик','Товар','1','100','-','-'):
+            await self.message(text)
+        await self.manual_button('total')
+        await self.message('-')
+        await save_invoice_analysis(self.path,self.ident,analysis())
+        await approve_invoice(self.path,self.ident,180,9,analysis()['items'])
+        snapshot=await self.inv()
+        await self.manual_button('save')
+        self.assertTrue(self.session.calls[-1].show_alert)
+        self.assertEqual((await self.inv())['analysis_json'],snapshot['analysis_json'])
+        self.assertEqual((await self.inv())['reward_amount'],9)
+
+    async def test_full_manual_header_and_item_fields_edit_in_draft_without_ai(self):
+        from db.invoices import decode_invoice_analysis
+        from services.invoice_editor import HEADER_FIELDS,ITEM_FIELDS
+        await self.start_empty_manual()
+        await self.manual_button('headers')
+        header_values={
+            'document_type':'УПД', 'invoice_number':'MAN-ALL-123', 'invoice_date':'28.10.2026',
+            'supplier':'Поставщик вручную', 'buyer':'Покупатель вручную', 'responsible_manager':'Иванов',
+            'currency':'usd', 'subtotal_before_discount':'500', 'discount_amount':'50',
+            'amount_payable':'450', 'vat_amount':'75',
+        }
+        for field,text in header_values.items():
+            await self.manual_button(f'field_h_-1_{list(HEADER_FIELDS).index(field)}')
+            await self.message(text)
+        self.assertIsNone((await self.inv())['analysis_json'])
+        await self.manual_button('resume')
+        self.assertEqual((await self.manual_state().get_data())['step'],'product_name')
+        for text in ('Товар','5','100','90','-'): await self.message(text)
+        await self.manual_button('items_0')
+        await self.manual_button('item_0')
+        item_values={'product_name':'Полное название', 'article':'SKU-ALL-1', 'unit':'упак',
+                     'quantity':'10', 'unit_price':'45', 'line_total':'450',
+                     'unit_price_before_discount':'50', 'discount_percent':'10', 'discount_amount':'50'}
+        for field,text in item_values.items():
+            await self.manual_button(f'field_i_0_{list(ITEM_FIELDS).index(field)}')
+            await self.message(text)
+        self.assertIsNone((await self.inv())['analysis_json'])
+        await self.manual_button('resume')
+        await self.manual_button('total')
+        await self.message('-')
+        await self.manual_button('save')
+        inv=await self.inv(); data=decode_invoice_analysis(inv)
+        for field,text in header_values.items():
+            self.assertEqual(data[field],parse_value(field,text))
+        item=data['items'][0]
+        self.assertEqual(set(item),set(ITEM_FIELDS))
+        for field,text in item_values.items():
+            self.assertEqual(item[field],parse_value(field,text))
+        self.assertEqual(data['recognition_source'],'manual')
+        self.assertEqual(inv['status'],'pending')
+        self.assertIsNone(inv['reward_amount'])
+        self.assertEqual(await list_invoice_items(self.path,self.ident),[])
+
+    async def test_manual_review_can_edit_any_item_and_clear_optional_fields(self):
+        from db.invoices import decode_invoice_analysis
+        from services.invoice_editor import HEADER_FIELDS,ITEM_FIELDS
+        await self.start_empty_manual()
+        for text in ('Supplier','First','1','100','-','-'): await self.message(text)
+        await self.manual_button('next')
+        for text in ('Second','1','200','-','-'): await self.message(text)
+        await self.manual_button('total')
+        await self.message('-')
+        await self.manual_button('items_0')
+        await self.manual_button('item_0')
+        await self.manual_button(f'field_i_0_{list(ITEM_FIELDS).index("article")}')
+        await self.message('SKU-1')
+        await self.manual_button(f'field_i_0_{list(ITEM_FIELDS).index("article")}')
+        await self.message('-')
+        await self.manual_button(f'field_i_0_{list(ITEM_FIELDS).index("product_name")}')
+        await self.message('Corrected first')
+        await self.manual_button('resume')
+        self.assertEqual((await self.manual_state().get_data())['step'],'review')
+        await self.manual_button('headers')
+        await self.manual_button(f'field_h_-1_{list(HEADER_FIELDS).index("vat_amount")}')
+        await self.message('0')
+        await self.manual_button(f'field_h_-1_{list(HEADER_FIELDS).index("vat_amount")}')
+        await self.message('-')
+        await self.manual_button('resume')
+        await self.manual_button('save')
+        data=decode_invoice_analysis(await self.inv())
+        self.assertEqual(data['items'][0]['product_name'],'Corrected first')
+        self.assertIsNone(data['items'][0]['article'])
+        self.assertEqual(data['items'][1]['product_name'],'Second')
+        self.assertIsNone(data['vat_amount'])
+
+    async def test_manual_all_schema_business_fields_have_draft_edit_controls(self):
+        import re
+        from services.invoice_editor import HEADER_FIELDS,ITEM_FIELDS
+        from services.invoice_recognition import INVOICE_SCHEMA
+        await self.start_empty_manual()
+        await self.manual_button('headers')
+        rendered=self.session.calls[-1].rich_message['html']
+        controls=[x for x in re.findall(r'data="([^"]+)"',rendered) if ':field_h_' in x]
+        self.assertEqual(len(controls),len(HEADER_FIELDS))
+        self.assertEqual(len(set(controls)),len(controls))
+        self.assertEqual(set(INVOICE_SCHEMA['properties'])-set(HEADER_FIELDS),{'confidence','warnings','total_amount','items'})
+        self.assertEqual(set(INVOICE_SCHEMA['properties']['items']['items']['properties']),set(ITEM_FIELDS))
+        self.assertEqual(self.session.calls[-1].reply_markup.inline_keyboard,[])
+
+    async def test_manual_field_validation_and_stale_draft_buttons(self):
+        from services.invoice_editor import HEADER_FIELDS
+        await self.start_empty_manual()
+        await self.manual_button('headers')
+        field_callback=await self.manual_button(f'field_h_-1_{list(HEADER_FIELDS).index("invoice_date")}')
+        await self.message('31.02.2026')
+        self.assertEqual((await self.manual_state().get_data())['step'],'field')
+        await self.message('28.10.2026')
+        await self.click(field_callback)
+        self.assertTrue(self.session.calls[-1].show_alert)
+        await self.manual_button('cancel')
+        self.assertIsNone((await self.inv())['analysis_json'])
+
+    async def test_manual_add_after_review_recalculates_all_items(self):
+        from db.invoices import decode_invoice_analysis
+        await self.start_empty_manual()
+        for text in ('Supplier','First','1','100','-','-'): await self.message(text)
+        await self.manual_button('total')
+        await self.message('-')
+        await self.manual_button('back')
+        await self.manual_button('next')
+        for text in ('Second','2','200','-','-'): await self.message(text)
+        await self.manual_button('total')
+        await self.message('-')
+        await self.manual_button('save')
+        data=decode_invoice_analysis(await self.inv())
+        self.assertEqual(len(data['items']),2)
+        self.assertEqual(data['amount_payable'],500)
+        self.assertEqual(data['subtotal_before_discount'],500)
+        self.assertEqual(data['discount_amount'],0)
+
+    async def test_add_to_saved_manual_invoice_updates_total_and_reward(self):
+        from db.invoices import decode_invoice_analysis
+        from services.invoice_editor import manual_analysis,manual_item
+        item=manual_item({'product_name':'First','quantity':4,'unit_price_before_discount':23,'unit_price':23,'line_total':92})
+        await save_invoice_analysis(self.path,self.ident,manual_analysis('Supplier',[item],92))
+        await self.click(cb('add',await self.inv()))
+        for text in ('Second','4','400'): await self.message(text)
+        data=decode_invoice_analysis(await self.inv())
+        self.assertEqual(len(data['items']),2)
+        self.assertEqual(data['amount_payable'],1692)
+        self.assertEqual(data['subtotal_before_discount'],1692)
+        await self.click(cb('confirm',await self.inv()))
+        await self.message('5')
+        inv=await self.inv()
+        self.assertEqual(inv['deal_amount'],1692)
+        self.assertEqual(inv['reward_amount'],84.6)
+
+    async def test_manual_global_discount_updates_with_new_items_and_can_reset(self):
+        from services.invoice_editor import HEADER_FIELDS
+        from handlers.admin.invoice_manual import draft_analysis
+        await self.start_empty_manual()
+        for text in ('Supplier','First','2','100','90','-'): await self.message(text)
+        await self.manual_button('headers')
+        await self.manual_button(f'field_h_-1_{list(HEADER_FIELDS).index("discount_amount")}')
+        await self.message('30')
+        data=await self.manual_state().get_data()
+        self.assertEqual(draft_analysis(data)['amount_payable'],170)
+        await self.manual_button('resume')
+        await self.manual_button('next')
+        for text in ('Second','1','50','-','-'): await self.message(text)
+        data=await self.manual_state().get_data()
+        self.assertEqual(draft_analysis(data)['amount_payable'],220)
+        self.assertEqual(draft_analysis(data)['calculated_total'],230)
+        await self.manual_button('headers')
+        await self.manual_button('auto_total')
+        data=await self.manual_state().get_data()
+        self.assertEqual(draft_analysis(data)['amount_payable'],230)
+        self.assertEqual(draft_analysis(data)['discount_amount'],20)
+
+    async def test_manual_discount_survives_reedit_without_losing_last_item(self):
+        from services.invoice_editor import HEADER_FIELDS
+        from handlers.admin.invoice_manual import draft_analysis
+        await self.start_empty_manual()
+        for text in ('Supplier','Only','1','100','-','-'): await self.message(text)
+        await self.manual_button('headers')
+        await self.manual_button(f'field_h_-1_{list(HEADER_FIELDS).index("discount_amount")}')
+        await self.message('80')
+        await self.manual_button('resume')
+        await self.manual_button('edit_item')
+        await self.manual_button('headers')
+        data=await self.manual_state().get_data()
+        self.assertEqual(len(data['items']),1)
+        self.assertEqual(draft_analysis(data)['amount_payable'],20)
 
     async def test_approved_edit_updates_accounting_atomically(self):
         await approve_invoice(self.path,self.ident,180,9,analysis()['items'])
